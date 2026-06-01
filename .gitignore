@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Never ship user data or secrets (defensive — these shouldn't be here anyway)
+kb-workspaces.json
+*.local.json
+.credentials.json
+*.log
+
+# Embedding cache / build artifacts
+.kb-cache/

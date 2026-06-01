@@ -1,0 +1,1494 @@
+#!/usr/bin/env python3
+"""KB sync — filesystem-based, cross-OS, single unified routine.
+
+Scans workspaces from ~/.claude/kb-workspaces.json for git repos, dedupes by
+remote.origin.url, then for each canonical repo:
+  - Fetches (best-effort, --prune) so integration refs are current and deleted
+    remote branches are pruned.
+  - For each free-form work branch (the branch name is the match key; an
+    optional "<type>/" prefix groups the KB folder), captures author commits
+    and asks Claude to create/update the KB entry.
+  - For each open ticket, detects whether its branch landed on an integration
+    branch (merge-commit/ff via ancestry, rebase/squash via patch-id) or was
+    deleted; if so, asks Claude to finalize the entry (resolved status, audit
+    of learnings vs final diff). Manual close via `/kb-mark --done` is honored.
+
+No platform API. Remote access limited to `git fetch`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+CONFIG = Path.home() / ".claude" / "kb-workspaces.json"
+STATE_DIR = Path.home() / ".claude" / "state"
+SESSION_OFFSETS = STATE_DIR / "kb-session-offsets.json"
+RUN_STATE = STATE_DIR / "kb-run-state.json"
+HWM_CAP_DAYS = 7
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+FM_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+
+
+# Embedding-backed retrieval (optional). When fastembed/numpy are installed,
+# capture and finalize pre-fetch top-K relevant Learnings/transcripts and inject
+# them inline — Claude headless no longer needs to discover-and-read via MCP.
+# When deps are missing, kb_embed is loaded but get_model() raises
+# EmbeddingsUnavailable on use; we catch and fall back to the legacy prompt.
+def _load_kb_embed():
+    import importlib.util as ilu
+    here = Path(__file__).resolve().parent
+    spec = ilu.spec_from_file_location("kb_embed", here / "kb-embed.py")
+    if spec is None or spec.loader is None:
+        return None
+    mod = ilu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        return None
+    return mod
+
+
+kb_embed = _load_kb_embed()
+
+
+# Shared engine config resolver (kb_config). Transitional: it currently lives
+# under hooks/; collapses into the engine package later. Loaded by path so the
+# scheduled run honors KB_VAULT and the single vault-resolution order.
+def _load_kb_config():
+    import importlib.util as ilu
+    path = Path(__file__).resolve().parent.parent / "hooks" / "kb_config.py"
+    if not path.exists():
+        return None
+    spec = ilu.spec_from_file_location("kb_config", path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = ilu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        return None
+    return mod
+
+
+kb_config = _load_kb_config()
+
+
+def parse_branch(branch: str):
+    """Map a free-form branch name to its KB folder layout.
+
+    The branch name itself is the durable match key (no numeric id required).
+    An optional "<type>/" prefix groups the folder; without a slash the ticket
+    folder sits directly under the project.
+
+      "feat/foo"          -> tipo="feat", slug="foo",         folder="feat/foo"
+      "feat/39703-gnre"   -> tipo="feat", slug="39703-gnre",  folder="feat/39703-gnre"
+      "experimento"       -> tipo=None,   slug="experimento", folder="experimento"
+    """
+    branch = branch.strip()
+    if "/" in branch:
+        tipo, slug = branch.split("/", 1)
+        return tipo, slug, f"{tipo}/{slug}"
+    return None, branch, branch
+
+
+def encode_cwd(cwd: str) -> str:
+    return re.sub(r"[:/\\_]", "-", cwd)
+
+
+def load_session_offsets() -> dict:
+    if not SESSION_OFFSETS.exists():
+        return {}
+    try:
+        return json.loads(SESSION_OFFSETS.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_session_offsets(data: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    SESSION_OFFSETS.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def find_sessions_for_branch(branch: str) -> list[dict]:
+    """Returns sessions where the SessionStart sidecar maps to this branch.
+
+    Each entry: {session_id, jsonl_path (Path or None), cwd}.
+    """
+    out = []
+    if not STATE_DIR.exists():
+        return out
+    for sidecar in STATE_DIR.glob("kb-session-branch-*.json"):
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("branch") != branch:
+            continue
+        sid = data.get("session_id", "")
+        cwd = data.get("cwd", "")
+        if not sid or not cwd:
+            continue
+        jsonl = PROJECTS_DIR / encode_cwd(cwd) / f"{sid}.jsonl"
+        out.append({
+            "session_id": sid,
+            "cwd": cwd,
+            "jsonl_path": jsonl if jsonl.exists() else None,
+        })
+    return out
+
+
+def session_hints(branch: str, offsets: dict) -> list[dict]:
+    """For sessions of this branch, compute incremental reading hints.
+
+    Returns only sessions with NEW content since last recorded offset.
+    """
+    hints = []
+    for s in find_sessions_for_branch(branch):
+        if not s["jsonl_path"]:
+            continue
+        try:
+            with s["jsonl_path"].open("r", encoding="utf-8", errors="ignore") as f:
+                current_lines = sum(1 for _ in f)
+        except OSError:
+            continue
+        prev = int(offsets.get(s["session_id"], 0) or 0)
+        if current_lines <= prev:
+            continue
+        hints.append({
+            "session_id": s["session_id"],
+            "path": str(s["jsonl_path"]),
+            "from_line": prev + 1,
+            "to_line": current_lines,
+            "new_lines": current_lines - prev,
+            "prev_offset": prev,
+        })
+    return hints
+
+
+def bump_session_offsets(hints: list[dict]) -> None:
+    if not hints:
+        return
+    offsets = load_session_offsets()
+    for h in hints:
+        offsets[h["session_id"]] = h["to_line"]
+    save_session_offsets(offsets)
+
+
+def load_run_state() -> dict:
+    if not RUN_STATE.exists():
+        return {}
+    try:
+        return json.loads(RUN_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_run_state(data: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    RUN_STATE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def ensure_installed_marker(state: dict) -> dict:
+    if "installed_at" not in state:
+        state["installed_at"] = datetime.now().strftime("%Y-%m-%d")
+    return state
+
+
+def effective_since(state: dict, origin_norm: str, branch: str, repo: Path) -> dict:
+    """Decide capture window for (origin, branch).
+
+    Returns dict with keys:
+      - kind: "commit" | "date"
+      - sha (when kind=commit) or iso (when kind=date)
+      - source: "hwm" | "bootstrap" | "cap-7d-truncated"
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    cap_date = (datetime.now() - timedelta(days=HWM_CAP_DAYS)).strftime("%Y-%m-%d")
+    installed = state.get("installed_at", today)
+
+    hwm = state.get("last_processed_commit", {}).get(origin_norm, {}).get(branch)
+    if hwm:
+        r = run_git(["merge-base", "--is-ancestor", hwm, branch], repo)
+        if r.returncode == 0:
+            return {"kind": "commit", "sha": hwm, "source": "hwm"}
+        print(f"    [warn] HWM {hwm[:10]} not ancestor of {branch} (rebase/force-push?), bootstrap fallback")
+
+    bootstrap_date = max(installed, cap_date)
+    source = "cap-7d-truncated" if cap_date > installed else "bootstrap"
+    if source == "cap-7d-truncated" and hwm:
+        print(f"    [warn] HWM stale (>{HWM_CAP_DAYS}d), capped at {bootstrap_date}, gap lost")
+    return {"kind": "date", "iso": bootstrap_date, "source": source}
+
+
+def bump_hwm(state: dict, origin_norm: str, branch: str, repo: Path) -> bool:
+    head_sha = run_git(["rev-parse", branch], repo).stdout.strip()
+    if not head_sha:
+        return False
+    state.setdefault("last_processed_commit", {}).setdefault(origin_norm, {})[branch] = head_sha
+    return True
+
+
+def load_config():
+    if not CONFIG.exists():
+        sys.exit(f"missing config: {CONFIG}")
+    cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+    # Unified vault resolution: honor KB_VAULT and the single resolution order
+    # (same contract as the hook/CLI). Falls back to the file's "vault" on any
+    # miss. kb-sync is CLI-side, so strict=True surfaces a misconfig loudly.
+    if kb_config is not None:
+        try:
+            cfg["vault"] = str(kb_config.resolve_vault(strict=True))
+        except Exception:
+            pass
+    return cfg
+
+
+def run_git(args, cwd, check=False, timeout=30):
+    r = subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=timeout,
+    )
+    if check and r.returncode != 0:
+        raise RuntimeError(f"git {args} failed in {cwd}: {r.stderr}")
+    return r
+
+
+def commit_vault(vault: Path) -> None:
+    """Commit the vault's changes to its LOCAL git repo, if any. NEVER pushes.
+
+    Local-only by design: the vault holds your private knowledge and has no remote
+    (a pre-push hook also blocks pushing). Safe no-op when the vault isn't a git
+    repo or has nothing to commit. Failures are logged, never fatal — a sync run
+    must not break because versioning hiccuped.
+    """
+    try:
+        if not (vault / ".git").exists():
+            return  # vault versioning not enabled (not a git repo)
+        run_git(["add", "-A"], cwd=vault, timeout=30)
+        status = run_git(["status", "--porcelain"], cwd=vault, timeout=30)
+        if not status.stdout.strip():
+            return  # nothing changed
+        msg = f"kb-sync: vault update {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        r = run_git(["commit", "-m", msg], cwd=vault, timeout=30)
+        if r.returncode == 0:
+            print(f"vault committed: {msg}")
+        else:
+            print(f"vault commit skipped/failed (non-fatal): {r.stderr.strip()[:200]}")
+    except Exception as e:
+        print(f"vault commit error (non-fatal): {type(e).__name__}: {e}")
+
+
+def discover_repos(workspace_path: Path, max_depth: int = 4):
+    repos = []
+
+    def walk(p: Path, depth: int):
+        if depth > max_depth:
+            return
+        try:
+            entries = sorted(p.iterdir())
+        except (PermissionError, OSError):
+            return
+        for sub in entries:
+            if not sub.is_dir():
+                continue
+            if sub.name in (".git", "node_modules", "target", ".venv", "__pycache__"):
+                continue
+            if (sub / ".git").exists():
+                repos.append(sub)
+                continue
+            walk(sub, depth + 1)
+
+    walk(workspace_path, 1)
+    return repos
+
+
+def repo_origin(repo: Path):
+    r = run_git(["config", "--get", "remote.origin.url"], repo)
+    return r.stdout.strip() or None
+
+
+def normalize_origin(url: str | None):
+    if not url:
+        return None
+    u = url.strip().rstrip("/")
+    if u.endswith(".git"):
+        u = u[:-4]
+    u = re.sub(r"^(git@|https?://)[^/:]+[/:]", "", u)
+    return u.lower()
+
+
+def dedupe_repos(repos):
+    by_key, no_origin = {}, []
+    for r in repos:
+        origin = repo_origin(r)
+        key = normalize_origin(origin)
+        if not key:
+            no_origin.append((origin, r))
+            continue
+        by_key.setdefault(key, []).append((origin, r))
+    canonical = []
+    for key, pairs in by_key.items():
+        pairs.sort(key=lambda p: len(str(p[1])))
+        canonical.append(pairs[0])
+    canonical.extend(no_origin)
+    return canonical
+
+
+def current_branch(repo: Path):
+    return run_git(["branch", "--show-current"], repo).stdout.strip()
+
+
+def list_candidate_branches(repo: Path, excluded: set):
+    """Local branches eligible for capture: everything except default/integration
+    branches (those are not tickets). Free-form names allowed."""
+    r = run_git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"], repo)
+    out = []
+    for b in r.stdout.split("\n"):
+        b = b.strip()
+        if b and b not in excluded:
+            out.append(b)
+    return out
+
+
+def fetch_repo(repo: Path):
+    """Best-effort `git fetch --prune` so integration refs are current and deleted
+    remote branches are pruned (branch-gone detection). Network/credential failures
+    are non-fatal (offline -> stale local refs)."""
+    try:
+        r = run_git(["fetch", "--prune", "--no-tags", "origin"], repo, timeout=180)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def resolve_default_branch(repo: Path, candidates):
+    for b in candidates:
+        if run_git(["rev-parse", "--verify", b], repo).returncode == 0:
+            return b
+    r = run_git(["symbolic-ref", "refs/remotes/origin/HEAD"], repo)
+    if r.returncode == 0:
+        return r.stdout.strip().split("/")[-1]
+    return None
+
+
+def user_email(repo: Path):
+    return run_git(["config", "user.email"], repo).stdout.strip()
+
+
+def author_commits_for_branch(repo: Path, branch: str, author: str, since_spec: dict, int_refs=()):
+    """Resolve the branch's OWN authored commits (HWM range / --since window).
+
+    Excludes merge commits (`--no-merges`) and anything already reachable from an
+    integration branch (`--not <int_refs>`), so a branch created off — and not
+    ahead of — dev/master yields zero commits and is skipped instead of being
+    credited with the whole dev->master gap. `--not` takes ALL refs in one clause:
+    a per-ref `--not a --not b` toggles sense back and re-includes `b`."""
+    tail = ["--pretty=format:%H%x09%ad%x09%s", "--date=iso-strict"]
+    kind = since_spec["kind"]
+    if kind == "commit":
+        rng, win = [f"{since_spec['sha']}..{branch}"], []
+    elif since_spec.get("hours") is not None:
+        rng, win = [branch], [f"--since={since_spec['hours']} hours ago"]
+    else:
+        rng, win = [branch], [f"--since={since_spec['iso']}"]
+    not_clause = ["--not", *int_refs] if int_refs else []
+    args = ["log", *rng, "--no-merges", f"--author={author}", *win, *tail, *not_clause]
+    r = run_git(args, repo)
+    return [line for line in r.stdout.split("\n") if line.strip()]
+
+
+def diff_stat(repo: Path, branch: str, base: str):
+    r = run_git(["diff", "--stat", f"{base}...{branch}"], repo, timeout=60)
+    return r.stdout.strip()
+
+
+def diff_full(repo: Path, branch: str, base: str, max_chars: int = 60000):
+    r = run_git(["diff", f"{base}...{branch}"], repo, timeout=120)
+    out = r.stdout
+    if len(out) > max_chars:
+        return out[:max_chars] + f"\n\n[... truncated, full diff was {len(out)} chars ...]"
+    return out
+
+
+def diff_two_dot(repo: Path, base: str, ref: str, max_chars: int = 60000):
+    """Net contribution of a branch (base..ref) — what it landed on merge."""
+    if not base or not ref:
+        return ""
+    out = run_git(["diff", f"{base}..{ref}"], repo, timeout=120).stdout
+    if len(out) > max_chars:
+        return out[:max_chars] + f"\n\n[... truncated, full diff was {len(out)} chars ...]"
+    return out
+
+
+def parse_frontmatter(path: Path):
+    txt = path.read_text(encoding="utf-8")
+    m = FM_RE.match(txt)
+    if not m:
+        return {}
+    out = {}
+    for line in m.group(1).split("\n"):
+        mm = re.match(r"^([A-Za-z_][\w-]*)\s*:\s*(.*)$", line)
+        if mm:
+            out[mm.group(1)] = mm.group(2).strip()
+    return out
+
+
+def _iter_ticket_dirs(base: Path):
+    """Yield ticket folders under a project, supporting both layouts:
+       <project>/<slug>/         (ungrouped — branch with no "/")
+       <project>/<type>/<slug>/  (type-grouped)
+    A ticket folder is identified by containing `_index.md`."""
+    if not base.exists():
+        return
+    for child in sorted(base.iterdir()):
+        if not child.is_dir() or child.name == "Learnings":
+            continue
+        if (child / "_index.md").exists():
+            yield child                       # ungrouped ticket
+            continue
+        for sub in sorted(child.iterdir()):   # type dir -> tickets
+            if sub.is_dir() and (sub / "_index.md").exists():
+                yield sub
+
+
+def ticket_status_for_branch(vault: Path, workspace: str, project: str, branch: str):
+    for tdir in _iter_ticket_dirs(vault / workspace / project):
+        fm = parse_frontmatter(tdir / "_index.md")
+        if fm.get("branch", "") == branch:
+            return fm.get("status", "")
+    return None
+
+
+def list_open_tickets(vault: Path, workspace: str, project: str):
+    out = []
+    for tdir in _iter_ticket_dirs(vault / workspace / project):
+        fm = parse_frontmatter(tdir / "_index.md")
+        status = fm.get("status", "")
+        # experimental included so a merge-to-production can finalize it; capture
+        # still skips experimental (paused until prod merge or manual in-progress).
+        if status in ("open", "in-progress", "experimental", ""):
+            out.append({
+                "id": fm.get("id", ""),
+                "slug": fm.get("slug", ""),
+                "branch": fm.get("branch", ""),
+                "title": fm.get("title", ""),
+                "path": tdir,
+            })
+    return out
+
+
+def resolve_ref(repo: Path, name: str):
+    """Resolve a branch to a usable ref, preferring the remote-tracking copy
+    (origin/<name>) so merge state reflects the remote, not the stale local."""
+    for ref in (f"origin/{name}", name):
+        if run_git(["rev-parse", "--verify", "--quiet", ref], repo).returncode == 0:
+            return ref
+    return None
+
+
+def resolved_integration_refs(repo: Path, integration_branches: list):
+    """Existing integration refs for this clone, preferring origin/<name> (freshest
+    remote state) and dropping names that resolve nowhere (e.g. develop/main absent).
+    Used for attribution: what counts as 'already integrated, not this branch's work'."""
+    out = []
+    for b in integration_branches:
+        ref = resolve_ref(repo, b)
+        if ref and ref not in out:
+            out.append(ref)
+    return out
+
+
+def nearest_integration_base(repo: Path, branch: str, int_refs: list):
+    """The integration ref the branch forks from = the one with the FEWEST commits
+    in `<ref>..branch`. Diff base, so a branch made off dev is diffed against dev,
+    not a stale master hundreds of commits behind."""
+    best, best_n = None, None
+    for ref in int_refs:
+        r = run_git(["rev-list", "--count", f"{ref}..{branch}"], repo)
+        try:
+            n = int(r.stdout.strip())
+        except ValueError:
+            continue
+        if best_n is None or n < best_n:
+            best, best_n = ref, n
+    return best
+
+
+def patch_id_of_diff(diff_text: str):
+    if not diff_text.strip():
+        return None
+    try:
+        r = subprocess.run(["git", "patch-id", "--stable"], input=diff_text,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=60)
+    except Exception:
+        return None
+    parts = r.stdout.split()
+    return parts[0] if parts else None
+
+
+def integration_patch_ids(repo: Path, merge_base: str, int_ref: str, limit: int = 400):
+    """patch-ids of (non-merge) commits on int_ref since merge_base, in one pass.
+    A squash-merge commit's diff equals the branch's combined diff -> same id."""
+    try:
+        log = subprocess.run(
+            ["git", "-C", str(repo), "log", "-p", "--no-merges", f"-n{limit}",
+             f"{merge_base}..{int_ref}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+        if not log.stdout.strip():
+            return set()
+        pid = subprocess.run(["git", "patch-id", "--stable"], input=log.stdout,
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=120)
+    except Exception:
+        return set()
+    ids = set()
+    for line in pid.stdout.splitlines():
+        parts = line.split()
+        if parts:
+            ids.add(parts[0])
+    return ids
+
+
+def detect_merge(repo: Path, integration_branches: list, branch: str):
+    """Positive merge evidence for a branch in ONE clone. Returns a dict or None.
+
+    Requires the branch to be resolvable in this clone (local or origin/). Pure
+    absence is NOT handled here — a branch missing from one clone may still be
+    alive in another; "gone" is decided across clones by the caller.
+
+    status="merged" -> work landed on an integration branch. `method`:
+        ancestor : merge-commit / fast-forward (git ancestry)
+        cherry   : rebase / single-commit squash (patch-id equivalence)
+        patchid  : multi-commit squash (combined patch-id match)
+    """
+    ref = resolve_ref(repo, branch)
+    if ref is None:
+        return None
+
+    for intb in integration_branches:
+        int_ref = resolve_ref(repo, intb)
+        if int_ref is None:
+            continue
+        mb = run_git(["merge-base", int_ref, ref], repo).stdout.strip()
+        if not mb:
+            continue
+        method = None
+        if run_git(["merge-base", "--is-ancestor", ref, int_ref], repo).returncode == 0:
+            method = "ancestor"
+        else:
+            cherry = run_git(["cherry", int_ref, ref], repo).stdout.strip().splitlines()
+            if cherry and all(l.startswith("-") for l in cherry):
+                method = "cherry"
+            else:
+                combined = run_git(["diff", f"{mb}..{ref}"], repo, timeout=120).stdout
+                cpid = patch_id_of_diff(combined)
+                if cpid and cpid in integration_patch_ids(repo, mb, int_ref):
+                    method = "patchid"
+        if method:
+            landed = run_git(["log", "-1", "--format=%ad", "--date=short", ref], repo).stdout.strip()
+            return {"status": "merged", "integration": intb, "method": method,
+                    "ref": ref, "merge_base": mb,
+                    "landed_date": landed or datetime.now().strftime("%Y-%m-%d")}
+    return None
+
+
+def manually_done_branches() -> set:
+    """Branches the user closed via `/kb-mark --done` (sidecar flag manual_done)."""
+    out = set()
+    if not STATE_DIR.exists():
+        return out
+    for sc in STATE_DIR.glob("kb-session-branch-*.json"):
+        try:
+            d = json.loads(sc.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("manual_done") and d.get("branch"):
+            out.add(d["branch"])
+    return out
+
+
+def clear_manual_done(branch: str):
+    """Drop manual_done from any sidecar pointing at this branch. Called after
+    a successful finalize so a future branch reusing the name doesn't re-fire it."""
+    if not STATE_DIR.exists():
+        return
+    for sc in STATE_DIR.glob("kb-session-branch-*.json"):
+        try:
+            d = json.loads(sc.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("branch") == branch and d.get("manual_done"):
+            d.pop("manual_done", None)
+            d.pop("done_at", None)
+            try:
+                sc.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+
+
+def manually_experimental_branches() -> set:
+    """Branches the user flagged via `/kb-mark --experimental` (sidecar flag
+    mark_experimental). Their freshly-captured _index.md is force-set to
+    status=experimental so retrieval down-weights them until they merge."""
+    out = set()
+    if not STATE_DIR.exists():
+        return out
+    for sc in STATE_DIR.glob("kb-session-branch-*.json"):
+        try:
+            d = json.loads(sc.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("mark_experimental") and d.get("branch"):
+            out.add(d["branch"])
+    return out
+
+
+def clear_mark_experimental(branch: str):
+    """Drop mark_experimental from sidecars for this branch after it's been
+    applied, so a future branch reusing the name doesn't inherit the flag."""
+    if not STATE_DIR.exists():
+        return
+    for sc in STATE_DIR.glob("kb-session-branch-*.json"):
+        try:
+            d = json.loads(sc.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("branch") == branch and d.get("mark_experimental"):
+            d.pop("mark_experimental", None)
+            try:
+                sc.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+
+
+def set_index_status(vault: Path, folder_rel: str, status: str) -> bool:
+    """Patch `status:` in <vault>/<folder_rel>/_index.md frontmatter. True on write."""
+    idx = vault / folder_rel / "_index.md"
+    if not idx.is_file():
+        return False
+    try:
+        text = idx.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    if not text.startswith("---"):
+        return False
+    end = text.find("\n---", 3)
+    if end < 0:
+        return False
+    fm, rest = text[:end], text[end:]
+    if re.search(r"(?m)^status:\s*.*$", fm):
+        fm = re.sub(r"(?m)^status:\s*.*$", f"status: {status}", fm, count=1)
+    else:
+        fm = fm.rstrip("\n") + f"\nstatus: {status}\n"
+    try:
+        idx.write_text(fm + rest, encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def claude_run(prompt: str, max_turns: int, dry_run: bool):
+    if dry_run:
+        print(f"  [DRY] would invoke claude --print (--max-turns={max_turns}, prompt={len(prompt)} chars)")
+        return 0, "", ""
+    cmd = ["claude", "--print", "--max-turns", str(max_turns), "--dangerously-skip-permissions"]
+    try:
+        r = subprocess.run(
+            cmd, input=prompt, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=900,
+        )
+        return r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired as e:
+        # Don't let one hung claude call kill the whole sync; caller treats
+        # rc!=0 as failure and skips HWM bump so the next run retries.
+        partial = e.stdout
+        if isinstance(partial, (bytes, bytearray)):
+            partial = partial.decode("utf-8", errors="replace")
+        return 124, (partial or ""), "TimeoutExpired after 900s"
+    except Exception as e:  # encoding/oserror/etc — keep going
+        return 1, "", f"claude_run exception: {type(e).__name__}: {e}"
+
+
+def build_pre_extracted_block(topk_learnings: list, topk_transcripts: list, vault: Path) -> str:
+    """Format embedding-retrieved snippets for inline injection into prompts.
+
+    Each entry's full text comes from the chunk's stored `text` field (set during
+    reindex). For older cache rows that predate that field, falls back to reading
+    the underlying .md from disk for "md" kind, or to the short preview otherwise.
+    """
+    if not topk_learnings and not topk_transcripts:
+        return ""
+    parts = []
+    if topk_learnings:
+        parts.append("## Pre-extracted learnings (top-K by embedding similarity)")
+        parts.append("These were semantically filtered against the diff/branch. **Audit the diff AGAINST them.** Don't browse other `Learnings/*.md` via MCP — they already passed the filter.")
+        parts.append("")
+        for item in topk_learnings:
+            body = item.get("text") or ""
+            if not body and item.get("kind") == "md" and kb_embed:
+                body = kb_embed.read_md_body(vault, item.get("path", ""), max_chars=1500)
+            if not body:
+                body = item.get("preview", "")
+            body = body.strip()[:1500]
+            sim = item.get("score", 0.0)
+            scope = item.get("scope", "?")
+            path = item.get("path", "?")
+            parts.append(f"### [[{path}]]  (sim={sim:.2f}, scope={scope})")
+            parts.append("```markdown")
+            parts.append(body)
+            parts.append("```")
+            parts.append("")
+    if topk_transcripts:
+        parts.append("## Excerpts from previous sessions (top-K relevant turns)")
+        parts.append("Design/intent insights from the user captured in these conversations. Pre-curated — no need to open `.jsonl` via Read.")
+        parts.append("")
+        for item in topk_transcripts:
+            text = (item.get("text") or item.get("preview", "")).strip()[:1200]
+            sid = (item.get("session_id") or "?")[:12]
+            sim = item.get("score", 0.0)
+            parts.append(f"### session {sid} turn {item.get('turn_idx','?')} (sim={sim:.2f})")
+            parts.append("```")
+            parts.append(text)
+            parts.append("```")
+            parts.append("")
+    return "\n".join(parts)
+
+
+def retrieve_for_branch(store, branch: str, project: str, commits: list, stat: str,
+                         k_learn: int = 5, k_trans: int = 3, min_score: float = 0.25):
+    """Run two retrievals for a (branch, project): learnings + transcripts.
+
+    Returns (learnings, transcripts). Always succeeds — returns ([], []) on any
+    error so the caller can proceed with the legacy prompt path."""
+    if store is None or kb_embed is None:
+        return [], []
+    try:
+        commit_subjects = " | ".join(c.split("\t", 2)[-1] for c in commits[:10])
+        query = f"{branch} | {commit_subjects} | {stat[:1500]}"
+        learnings = kb_embed.retrieve_top_k(
+            query, k=k_learn,
+            scope={"workspace", "project", "ticket"},
+            project=project,
+            kind={"md"},
+            store=store,
+        )
+        transcripts = kb_embed.retrieve_top_k(
+            query, k=k_trans,
+            kind={"transcript"},
+            branch=branch,
+            store=store,
+        )
+        # drop noise: low-similarity hits typically aren't relevant and just bloat
+        # the prompt. Below ~0.25 cosine the chunk is barely related.
+        learnings = [x for x in learnings if x.get("score", 0.0) >= min_score]
+        transcripts = [x for x in transcripts if x.get("score", 0.0) >= min_score]
+        return learnings, transcripts
+    except Exception as e:
+        print(f"  [embed] retrieve failed for {branch}: {e}")
+        return [], []
+
+
+def format_session_hints_block(hints: list[dict]) -> str:
+    if not hints:
+        return ""
+    lines = [
+        "",
+        "Claude Code session transcripts associated with this branch (incremental):",
+        "Each entry shows where to RESUME reading. Use the Read tool with `offset` and `limit`",
+        "to fetch only the new lines. Distill design intent, instructions, or decisions from the",
+        "user that don't appear in the diff — those are the strongest learning candidates.",
+        "",
+    ]
+    for h in hints:
+        lines.append(
+            f"- session {h['session_id'][:8]} — `{h['path']}` — "
+            f"resume at line {h['from_line']} (new lines: {h['new_lines']}; "
+            f"total now: {h['to_line']}; previously consumed: {h['prev_offset']})"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def capture_prompt(cfg, workspace, repo, branch, tipo, slug, folder_rel, default, commits, stat, diff, hints, pre_extracted: str = ""):
+    vault = cfg["vault"]
+    hints_block = "" if pre_extracted else format_session_hints_block(hints)
+    folder = f"{workspace}/{repo.name}/{folder_rel}"
+    type_line = f"type: {tipo}\n" if tipo else ""
+    pre_block = f"\n{pre_extracted}\n" if pre_extracted else ""
+    if pre_extracted:
+        step3_text = (
+            "3. **Audit mode (pre-fetched):** the relevant existing learnings (ticket + project + "
+            "workspace scope) are provided in the \"Pre-extracted learnings\" block above — "
+            "they passed the semantic filter against the diff. Audit the diff AGAINST them. Do "
+            "NOT browse other `Learnings/*.md` — assume that block is the complete relevant set. "
+            f"The only extra file you may Read is this ticket's own `{vault}/{folder}/_index.md` "
+            "(if it exists)."
+        )
+    else:
+        step3_text = (
+            f"3. If it exists: read current `{vault}/{folder}/_index.md` and existing "
+            f"`{vault}/{folder}/Learnings/*.md` (ticket scope), plus "
+            f"`{vault}/{workspace}/{repo.name}/Learnings/*.md` (project scope) and "
+            f"`{vault}/{workspace}/Learnings/*.md` (workspace scope) by frontmatter + first paragraph."
+        )
+    return f"""You are running headless in KB sync mode. Do not ask for confirmation — execute.
+
+Vault root (absolute): `{vault}`
+**Use the standard Read/Write/Edit/Glob tools — do NOT use any MCP server.** Every KB path below is RELATIVE to the vault root; prefix it (e.g. create `{vault}/{folder}/_index.md`). The headless run's cwd is a code dir, NOT the vault — always use the absolute vault path above.
+Workspace folder: `{workspace}/`
+Project folder: `{workspace}/{repo.name}/`
+Branch: `{branch}` (the branch name is the KB match key; type={tipo or '—'}, slug={slug})
+Default branch: {default}
+
+Recent commits by user on this branch:
+```
+{chr(10).join(commits[:50])}
+```
+
+Diff stat ({default}...{branch}):
+```
+{stat}
+```
+
+Full diff (may be truncated):
+```diff
+{diff}
+```
+{hints_block}{pre_block}
+Task:
+1. Check if the KB folder `{vault}/{folder}/` already exists (exact path — derives from the branch, not a numeric id). Use Glob or Bash `ls`.
+2. If missing: create `{vault}/{folder}/Learnings/` and `{vault}/{folder}/_index.md` with this frontmatter (English schema):
+```yaml
+---
+project: {repo.name}
+{type_line}module:
+slug: {slug}
+title:
+status: open
+opened: <YYYY-MM-DD today>
+resolved:
+last_update: <YYYY-MM-DD today>
+apparent_problem: |-
+  <derived from commit messages — concise>
+actual_solution:
+tags: []
+related_tickets: []
+branch: {branch}
+pr:
+---
+```
+{step3_text}
+4. Audit current learnings against the diff. For each one classify:
+   - CONFIRMS — diff matches the learning, keep.
+   - REFUTES — diff contradicts; correct the file, add `## Correction history` line.
+   - ADJUSTS — partially right; edit to incorporate nuance.
+   - ADDS — diff/commits reveal new pattern; create new learning file. Classify scope:
+     - ticket: `{vault}/{folder}/Learnings/<name>.md`
+     - project: `{vault}/{workspace}/{repo.name}/Learnings/<name>.md`
+     - workspace: `{vault}/{workspace}/Learnings/<name>.md`
+   Default conservative: ticket.
+5. Update `{vault}/{folder}/_index.md` apparent_problem / tags / related_tickets based on commits + diff. **Always set `last_update: <YYYY-MM-DD today>`**. Keep `branch: {branch}` intact — it is the match key. Do NOT set status=resolved here — only the finalize routine does that. Use English frontmatter keys: project, type, module, slug, title, opened, resolved, last_update, apparent_problem, actual_solution, related_tickets, branch, pr. Status enum: open|in-progress|resolved|discarded. Scope enum: ticket|project|workspace.
+6. Report briefly: created/updated file paths, CONFIRMS/REFUTES/ADJUSTS/ADDS counts and names.
+
+YAML rules: long text fields use literal `|-` block; tags as `[a, b, c]`. Validate YAML before writing.
+Do not ask. Default conservative: ticket scope; skip on ambiguity rather than promote.
+"""
+
+
+def finalize_prompt(cfg, workspace, repo, ticket, res, landed_diff, hints, pre_extracted: str = ""):
+    vault = cfg["vault"]
+    hints_block = "" if pre_extracted else format_session_hints_block(hints)
+    pre_block = f"\n{pre_extracted}\n" if pre_extracted else ""
+    if pre_extracted:
+        steps12_text = (
+            f"1. Read `{vault}/{ticket['path']}/_index.md` and all `{vault}/{ticket['path']}/Learnings/*.md` of THIS ticket (Read/Glob).\n"
+            "2. **Cross-scope (pre-fetched mode):** the relevant project- and workspace-scope "
+            "learnings are provided in the \"Pre-extracted learnings\" block above. Audit "
+            "AGAINST those — do NOT browse other `Learnings/*.md`."
+        )
+    else:
+        steps12_text = (
+            f"1. Read `{vault}/{ticket['path']}/_index.md` and all `{vault}/{ticket['path']}/Learnings/*.md` (Read/Glob).\n"
+            f"2. Also read `{vault}/{workspace}/{repo.name}/Learnings/*.md` (project scope) and "
+            f"`{vault}/{workspace}/Learnings/*.md` (workspace scope) — frontmatter + first paragraph of each."
+        )
+    if res["status"] == "merged":
+        how = (f"The branch landed on `{res['integration']}` (detected via "
+               f"{res['method']}). The diff it contributed is below.")
+        diff_block = f"\nWhat the branch landed:\n```diff\n{landed_diff}\n```\n"
+    elif res["status"] == "manual":
+        how = ("The user explicitly closed this ticket via `/kb-mark --done`. "
+               "Synthesize `actual_solution` from the accumulated `_index.md` + Learnings.")
+        diff_block = ""
+    else:  # gone
+        how = ("The branch no longer exists (deleted on merge). No final diff is "
+               "available — synthesize `actual_solution` from the accumulated "
+               "`_index.md` + Learnings and the earlier captured commits.")
+        diff_block = ""
+    return f"""You are running headless in KB finalize mode. Do not ask — execute.
+
+Vault: `{vault}` (use obsidian-vault MCP).
+KB folder: `{ticket['path']}`
+Project: {repo.name}
+Branch (match key): {ticket.get('branch','')}
+
+Resolution: {how}
+Resolved date: {res['landed_date']}
+{diff_block}{hints_block}{pre_block}
+Task:
+{steps12_text}
+3. Synthesize `actual_solution` (2-4 lines, past tense: what was actually done) from the evidence above.
+4. Audit each existing learning (ticket + project + workspace scope):
+   - CONFIRMS — keep.
+   - REFUTES — correct the file, add `## Correction history` line.
+   - ADJUSTS — edit to incorporate nuance.
+   - ADDS — new pattern not yet recorded; create new learning file (default scope: ticket).
+   Workspace/project-scope corrections need concrete evidence; in doubt, leave them alone and add a ticket-scope note.
+5. Update `_index.md`:
+   - status: resolved
+   - resolved: {res['landed_date']}
+   - last_update: <YYYY-MM-DD today>
+   - actual_solution: <synthesized>
+   - keep `branch` and `pr` as-is.
+6. Report: status set, learnings audit counts (CONFIRMS/REFUTES/ADJUSTS/ADDS), ambiguous decisions noted.
+
+YAML rules: long text fields use literal `|-` block; tags as `[a, b, c]`. English schema keys only. Status enum: open|in-progress|resolved|discarded.
+Do not ask.
+"""
+
+
+class RunReport:
+    def __init__(self):
+        self.start_ts = time.time()
+        self.start_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.captures: list[dict] = []
+        self.finalizes: list[dict] = []
+        self.errors: list[dict] = []
+        self.fetch_failures: list[dict] = []
+
+    def add_fetch_failure(self, workspace: str, repo_rel: str, origin: str):
+        self.fetch_failures.append({"workspace": workspace, "repo_rel": repo_rel, "origin": origin})
+
+    def add_capture(self, workspace: str, repo_name: str, repo_rel: str, branch: str,
+                    ticket_id: str, slug: str, commits: int, hints: list,
+                    bumped: bool, rc: int, stdout: str, stderr: str, since_source: str = "unknown"):
+        self.captures.append({
+            "workspace": workspace,
+            "repo_name": repo_name,
+            "repo_rel": repo_rel,
+            "branch": branch,
+            "ticket_id": ticket_id,
+            "slug": slug,
+            "commits": commits,
+            "hints": hints,
+            "bumped": bumped,
+            "rc": rc,
+            "stdout": stdout,
+            "stderr": stderr,
+            "since_source": since_source,
+        })
+
+    def add_finalize(self, workspace: str, repo_name: str, repo_rel: str, ticket: dict,
+                     merge: dict, hints: list, bumped: bool, rc: int, stdout: str, stderr: str):
+        self.finalizes.append({
+            "workspace": workspace,
+            "repo_name": repo_name,
+            "repo_rel": repo_rel,
+            "ticket_id": ticket.get("id", ""),
+            "slug": ticket.get("slug", ""),
+            "type": ticket.get("type", ""),
+            "branch": ticket.get("branch", ""),
+            "merge_hash": merge.get("hash", ""),
+            "merge_subject": merge.get("subject", ""),
+            "merge_branch": merge.get("branch", ""),
+            "merge_date": merge.get("date", ""),
+            "hints": hints,
+            "bumped": bumped,
+            "rc": rc,
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+
+    def changed_files(self, vault: Path) -> list[Path]:
+        if not vault.exists():
+            return []
+        out = []
+        for p in vault.rglob("*.md"):
+            if ".obsidian" in p.parts:
+                continue
+            try:
+                if p.stat().st_mtime >= self.start_ts:
+                    out.append(p)
+            except OSError:
+                continue
+        return sorted(out)
+
+    def has_activity(self) -> bool:
+        return bool(self.captures or self.finalizes)
+
+    def write_html(self, vault: Path, out_path: Path):
+        changed = self.changed_files(vault)
+        end_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        duration_s = int(time.time() - self.start_ts)
+
+        def esc(s):
+            return html.escape(str(s)) if s is not None else ""
+
+        def file_card(p: Path) -> str:
+            try:
+                txt = p.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                return ""
+            fm = ""
+            m = FM_RE.match(txt)
+            if m:
+                fm = m.group(1)
+            try:
+                rel = p.relative_to(vault).as_posix()
+            except ValueError:
+                rel = str(p)
+            return (
+                f'<div class="file"><div class="path">{esc(rel)}</div>'
+                f'<pre class="fm">{esc(fm)}</pre></div>'
+            )
+
+        def offset_block(hints: list, bumped: bool) -> str:
+            if not hints:
+                return '<div class="offsets none">Session offsets: <b>no session with a delta</b> (nothing to read incrementally).</div>'
+            bumped_tag = (
+                '<span class="pill ok">bumped</span>'
+                if bumped
+                else '<span class="pill warn">NOT bumped</span> <small>(dry-run or rc≠0; next run reprocesses)</small>'
+            )
+            rows = "".join(
+                f'<tr><td><code>{esc(h["session_id"][:8])}</code></td>'
+                f'<td>{h["prev_offset"]}</td>'
+                f'<td>{h["from_line"]}–{h["to_line"]}</td>'
+                f'<td><b>{h["new_lines"]}</b></td>'
+                f'<td><small>{esc(h["path"])}</small></td></tr>'
+                for h in hints
+            )
+            return (
+                f'<div class="offsets"><div class="off-head">Session offsets: {len(hints)} session(s) with a delta · {bumped_tag}</div>'
+                f'<table class="off-tbl"><thead><tr><th>session</th><th>prev</th><th>range</th><th>new</th><th>jsonl</th></tr></thead>'
+                f'<tbody>{rows}</tbody></table></div>'
+            )
+
+        cap_html = []
+        for c in self.captures:
+            status = "ok" if c["rc"] == 0 else "err"
+            cap_html.append(
+                f'<details class="card {status}"><summary>'
+                f'<span class="tag">capture</span> '
+                f'<b>{esc(c["repo_rel"])}</b> · {esc(c["branch"])} '
+                f'<span class="meta">id={esc(c["ticket_id"])} · {c["commits"]} commits · window={esc(c.get("since_source","?"))} · hints={len(c["hints"])} · rc={c["rc"]}</span>'
+                f'</summary>'
+                + offset_block(c["hints"], c["bumped"])
+                + f'<pre class="out">{esc(c["stdout"][:8000])}</pre>'
+                + (f'<pre class="err">{esc(c["stderr"][:2000])}</pre>' if c["stderr"].strip() else "")
+                + '</details>'
+            )
+
+        fin_html = []
+        for f in self.finalizes:
+            status = "ok" if f["rc"] == 0 else "err"
+            fin_html.append(
+                f'<details class="card {status}"><summary>'
+                f'<span class="tag fin">finalize</span> '
+                f'<b>{esc(f["repo_rel"])}</b> · {esc(f["slug"] or f["ticket_id"])} '
+                f'<span class="meta">{("merged into " + esc(f["merge_branch"])) if f["merge_branch"] else "resolved"} · {esc(f["merge_date"])} · rc={f["rc"]}</span>'
+                f'</summary>'
+                f'<div class="subject">{esc(f["merge_subject"])}</div>'
+                + offset_block(f["hints"], f["bumped"])
+                + f'<pre class="out">{esc(f["stdout"][:8000])}</pre>'
+                + (f'<pre class="err">{esc(f["stderr"][:2000])}</pre>' if f["stderr"].strip() else "")
+                + '</details>'
+            )
+
+        files_html = "".join(file_card(p) for p in changed) or "<p class='empty'>No files changed.</p>"
+
+        warn_html = ""
+        if self.fetch_failures:
+            rows = "".join(
+                f'<li><code>{esc(f["repo_rel"])}</code> '
+                f'<small style="color:#5a6473">({esc(f["workspace"])})</small> — {esc(f["origin"])}</li>'
+                for f in self.fetch_failures
+            )
+            warn_html = (
+                '<div class="card err" style="border-left-color:#fcd34d">'
+                '<b style="color:#fcd34d">&#9888; Fetch failed — merge detection ran on STALE refs</b>'
+                '<div style="font-size:.85rem;color:#8a93a0;margin:4px 0 2px">'
+                'origin was unreachable for the repos below (offline / bad credentials). Finalize merge '
+                'detection and capture base used stale remote-tracking refs, so a branch merged on the '
+                'remote may be missed (ticket not finalized) and a capture diff may be slightly off until '
+                'the next successful fetch. Re-run after restoring access.'
+                f'</div><ul style="margin:6px 0 2px">{rows}</ul></div>'
+            )
+
+        doc = f"""<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>kb-sync report — {end_iso}</title>
+<style>
+  body {{ background:#0b0d10; color:#d7dde6; font-family: ui-sans-serif, system-ui, sans-serif; margin:0; padding:24px 28px 60px; line-height:1.5; }}
+  h1 {{ margin:0 0 4px; font-size:1.5rem; }}
+  .lede {{ color:#8a93a0; font-size:.9rem; margin-bottom:18px; }}
+  h2 {{ margin:28px 0 10px; font-size:1.1rem; border-bottom:1px solid #1f2731; padding-bottom:6px; }}
+  .card {{ background:#11151a; border:1px solid #1f2731; border-radius:10px; padding:10px 14px; margin:8px 0; }}
+  .card.ok {{ border-left:3px solid #6ee7b7; }}
+  .card.err {{ border-left:3px solid #fca5a5; }}
+  summary {{ cursor:pointer; }}
+  .tag {{ display:inline-block; padding:1px 8px; border-radius:999px; font-size:.72rem; font-weight:600; background:rgba(110,231,183,.12); color:#6ee7b7; border:1px solid rgba(110,231,183,.3); margin-right:6px; }}
+  .tag.fin {{ background:rgba(147,197,253,.12); color:#93c5fd; border-color:rgba(147,197,253,.3); }}
+  .meta {{ color:#5a6473; font-size:.8rem; font-family: ui-monospace, Consolas, monospace; margin-left:8px; }}
+  .subject {{ color:#fdba74; margin:6px 0; font-style:italic; }}
+  pre {{ background:#0e1217; border:1px solid #1c2530; border-radius:6px; padding:10px 12px; overflow-x:auto; font-size:.82rem; color:#c8d3e0; white-space:pre-wrap; }}
+  pre.err {{ border-color:rgba(252,165,165,.3); color:#fca5a5; }}
+  .file {{ background:#11151a; border:1px solid #1f2731; border-radius:8px; padding:8px 12px; margin:6px 0; }}
+  .file .path {{ color:#6ee7b7; font-family: ui-monospace, Consolas, monospace; font-size:.82rem; margin-bottom:4px; }}
+  .file .fm {{ font-size:.78rem; margin:0; }}
+  .empty {{ color:#5a6473; }}
+  .stats {{ display:flex; gap:18px; margin:12px 0; font-size:.88rem; }}
+  .stats b {{ color:#fff; }}
+  .offsets {{ margin:8px 0; padding:8px 10px; background:#0e1217; border:1px solid #1c2530; border-radius:6px; font-size:.84rem; }}
+  .offsets.none {{ color:#5a6473; font-style:italic; }}
+  .off-head {{ margin-bottom:6px; color:#8a93a0; }}
+  .off-tbl {{ width:100%; border-collapse:collapse; font-size:.8rem; }}
+  .off-tbl th, .off-tbl td {{ padding:3px 8px; text-align:left; border-bottom:1px solid #1c2530; }}
+  .off-tbl th {{ color:#5a6473; font-weight:600; }}
+  .off-tbl td code {{ background:transparent; border:0; padding:0; color:#6ee7b7; }}
+  .off-tbl td small {{ color:#5a6473; font-family: ui-monospace, Consolas, monospace; }}
+  .pill {{ display:inline-block; padding:1px 8px; border-radius:999px; font-size:.7rem; font-weight:600; }}
+  .pill.ok {{ background:rgba(110,231,183,.15); color:#6ee7b7; border:1px solid rgba(110,231,183,.3); }}
+  .pill.warn {{ background:rgba(252,211,77,.15); color:#fcd34d; border:1px solid rgba(252,211,77,.3); }}
+</style></head>
+<body>
+<h1>kb-sync — run report</h1>
+<div class="lede">Start <b>{esc(self.start_iso)}</b> · End <b>{esc(end_iso)}</b> · Duration {duration_s}s</div>
+<div class="stats">
+  <div>Captures: <b>{len(self.captures)}</b></div>
+  <div>Finalizes: <b>{len(self.finalizes)}</b></div>
+  <div>Files changed: <b>{len(changed)}</b></div>
+  <div>Vault: <b>{esc(vault)}</b></div>
+</div>
+{warn_html}
+<h2>Captures ({len(self.captures)})</h2>
+{"".join(cap_html) or "<p class='empty'>No captures.</p>"}
+
+<h2>Finalizes ({len(self.finalizes)})</h2>
+{"".join(fin_html) or "<p class='empty'>No finalizes.</p>"}
+
+<h2>Files modified in the vault ({len(changed)})</h2>
+{files_html}
+
+</body></html>"""
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(doc, encoding="utf-8")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--since-hours", type=int, default=None)
+    ap.add_argument("--dry-run", action="store_true", help="enumerate work without calling claude")
+    ap.add_argument("--workspace", help="limit to one workspace by name")
+    ap.add_argument("--repo", help="limit to one repo by name (basename)")
+    ap.add_argument("--branch", help="limit capture/finalize to one branch by exact name")
+    ap.add_argument("--skip-finalize", action="store_true", help="capture only, skip merge detection")
+    ap.add_argument("--skip-capture", action="store_true", help="finalize only")
+    ap.add_argument("--include-resolved", action="store_true", help="re-process tickets already marked resolved in KB")
+    ap.add_argument("--ignore-hwm", action="store_true", help="skip HWM lookup; force bootstrap window (debug/reprocess)")
+    args = ap.parse_args()
+
+    cfg = load_config()
+    vault = Path(cfg["vault"])
+    default_candidates = cfg.get("default_branches", ["master", "main"])
+    integration_branches = cfg.get("integration_branches", default_candidates)
+    # Resolution set: only a merge into production (master/main) finalizes a ticket.
+    # Distinct from integration_branches (attribution; includes dev) on purpose —
+    # merging to dev must NOT flip a ticket (esp. experimental) to resolved.
+    production_branches = cfg.get("production_branches", ["master", "main"])
+    excluded_branches = set(default_candidates) | set(integration_branches)
+    max_turns = cfg.get("max_turns", 30)
+
+    state = load_run_state()
+    state = ensure_installed_marker(state)
+    save_run_state(state)
+
+    captures, finalizes, errors = 0, 0, 0
+    report = RunReport()
+
+    for ws in cfg["workspaces"]:
+        if args.workspace and ws["name"] != args.workspace:
+            continue
+        wpath = Path(ws["path"])
+        print(f"\n=== workspace {ws['name']} -> {wpath} ===")
+        if not wpath.exists():
+            print(f"  path missing")
+            continue
+
+        repos = discover_repos(wpath)
+        print(f"  discovered={len(repos)} repos")
+        ok_count, fetch_failed = 0, []
+        for r in repos:
+            if fetch_repo(r):
+                ok_count += 1
+            elif repo_origin(r):
+                # has a remote but fetch failed -> origin/* refs are stale, real risk.
+                # repos with no remote are skipped (local is authoritative, no staleness).
+                fetch_failed.append(r)
+        print(f"  fetched (prune) {ok_count}/{len(repos)} repos")
+        for r in fetch_failed:
+            rel = r.relative_to(wpath)
+            print(f"    [warn] fetch FAILED (origin unreachable): {rel} — capture/finalize using STALE refs")
+            report.add_fetch_failure(ws["name"], str(rel), repo_origin(r) or "")
+
+        # Embedding-backed retrieval store: reindex vault (and transcripts of
+        # open branches) so capture/finalize can inject top-K snippets inline
+        # instead of telling Claude headless to discover-and-read via MCP.
+        embed_store = None
+        if kb_embed is not None:
+            try:
+                embed_store = kb_embed.VectorStore()
+                kb_embed.reindex_vault(Path(cfg["vault"]), embed_store, verbose=True)
+                # collect branches relevant for transcript indexing
+                relevant_branches = set()
+                for rr in repos:
+                    if args.repo and rr.name != args.repo:
+                        continue
+                    relevant_branches.update(list_candidate_branches(rr, excluded_branches))
+                    for t in list_open_tickets(vault, ws["name"], rr.name):
+                        if t.get("branch"):
+                            relevant_branches.add(t["branch"])
+                kb_embed.reindex_transcripts(relevant_branches, STATE_DIR, PROJECTS_DIR,
+                                              embed_store, verbose=True)
+                embed_store.save()
+            except kb_embed.EmbeddingsUnavailable as e:
+                print(f"  [embed] disabled: {e} — falling back to legacy prompt path")
+                embed_store = None
+            except Exception as e:
+                print(f"  [embed] reindex failed: {type(e).__name__}: {e}")
+                embed_store = None
+
+        if not args.skip_capture:
+            candidates = []
+            for r in repos:
+                if args.repo and r.name != args.repo:
+                    continue
+                email = user_email(r)
+                int_refs = resolved_integration_refs(r, integration_branches)
+                origin_norm = normalize_origin(repo_origin(r)) or str(r)
+                for branch in list_candidate_branches(r, excluded_branches):
+                    if args.branch and branch != args.branch:
+                        continue
+                    tipo, slug, folder_rel = parse_branch(branch)
+                    if args.since_hours is not None:
+                        since_spec = {"kind": "date", "hours": args.since_hours, "source": "cli-override"}
+                    elif args.ignore_hwm:
+                        today = datetime.now().strftime("%Y-%m-%d")
+                        cap_date = (datetime.now() - timedelta(days=HWM_CAP_DAYS)).strftime("%Y-%m-%d")
+                        installed = state.get("installed_at", today)
+                        bootstrap_date = max(installed, cap_date)
+                        src = "cap-7d-truncated" if cap_date > installed else "bootstrap"
+                        since_spec = {"kind": "date", "iso": bootstrap_date, "source": src}
+                    else:
+                        since_spec = effective_since(state, origin_norm, branch, r)
+                    commits = author_commits_for_branch(r, branch, email, since_spec, int_refs)
+                    if not commits:
+                        print(f"  [skip] {r.relative_to(wpath)}:{branch} — no new authored commits to capture "
+                              f"(window={since_spec['source']}, excl. merges + {', '.join(int_refs) or 'no integration ref'})")
+                        continue
+                    base = nearest_integration_base(r, branch, int_refs) or resolve_default_branch(r, default_candidates)
+                    tr = run_git(["log", branch, "-1", "--pretty=format:%at"], r)
+                    try:
+                        ts = int(tr.stdout.strip())
+                    except ValueError:
+                        ts = 0
+                    candidates.append((ts, origin_norm, branch, r, tipo, slug, folder_rel, commits, email, since_spec, base))
+
+            candidates.sort(reverse=True)
+            exp_branches = manually_experimental_branches()
+            seen = set()
+            for ts, origin_norm, branch, repo, tipo, slug, folder_rel, commits, email, since_spec, base in candidates:
+                key = (origin_norm, branch)
+                if key in seen:
+                    print(f"  [dup-skip] {repo.relative_to(wpath)}:{branch} — already processed in fresher clone")
+                    continue
+                seen.add(key)
+                if not args.include_resolved:
+                    st = ticket_status_for_branch(vault, ws["name"], repo.name, branch)
+                    if st in ("resolved", "experimental"):
+                        why = "already resolved" if st == "resolved" else "experimental (paused until prod merge or manual in-progress)"
+                        print(f"  [skip] {repo.relative_to(wpath)}:{branch} — KB {why}")
+                        continue
+                    # Skip capture when an existing open ticket's branch is already
+                    # merged — finalize will resolve it from accumulated state. Saves
+                    # an expensive Claude call. Only applies when the folder already
+                    # exists (st is not None); new branches still capture to create
+                    # the initial record.
+                    if st is not None:
+                        mres = detect_merge(repo, integration_branches, branch)
+                        if mres:
+                            print(f"  [skip-merged] {repo.relative_to(wpath)}:{branch} — "
+                                  f"already {mres['method']} into {mres['integration']}; finalize handles")
+                            continue
+                if not base:
+                    print(f"  [skip] {repo.relative_to(wpath)}:{branch} — no integration base / default branch")
+                    continue
+                print(f"  [capture] {repo.relative_to(wpath)}:{branch} — {len(commits)} commits vs {base} (window: {since_spec['source']})")
+                stat = diff_stat(repo, branch, base)
+                diff = diff_full(repo, branch, base)
+                offsets = load_session_offsets()
+                hints = session_hints(branch, offsets)
+                if hints:
+                    print(f"    session hints: {len(hints)} session(s) with new content")
+                topk_l, topk_t = retrieve_for_branch(embed_store, branch, repo.name, commits, stat)
+                pre_extracted = build_pre_extracted_block(topk_l, topk_t, Path(cfg["vault"])) if (topk_l or topk_t) else ""
+                if pre_extracted:
+                    print(f"    [embed] injected: {len(topk_l)} learnings + {len(topk_t)} transcript turns")
+                prompt = capture_prompt(cfg, ws["name"], repo, branch, tipo, slug, folder_rel, base, commits, stat, diff, hints, pre_extracted=pre_extracted)
+                rc, out, err = claude_run(prompt, max_turns, args.dry_run)
+                captures += 1
+                bumped = rc == 0 and not args.dry_run
+                report.add_capture(ws["name"], repo.name, str(repo.relative_to(wpath)), branch,
+                                   slug, slug, len(commits), hints, bumped, rc, out, err, since_spec["source"])
+                if rc != 0:
+                    errors += 1
+                    print(f"    claude rc={rc}")
+                    if err.strip():
+                        print(f"    stderr: {err.strip()[:500]}")
+                elif not args.dry_run:
+                    bump_session_offsets(hints)
+                    if bump_hwm(state, origin_norm, branch, repo):
+                        save_run_state(state)
+                    if branch in exp_branches:
+                        if set_index_status(vault, f"{ws['name']}/{repo.name}/{folder_rel}", "experimental"):
+                            print(f"    [experimental] status=experimental forced on {folder_rel}/_index.md")
+                        clear_mark_experimental(branch)
+                if out.strip():
+                    for line in out.splitlines()[:60]:
+                        print(f"    {line}")
+
+        if not args.skip_finalize:
+            done_branches = manually_done_branches()
+            # Group clones by origin so a ticket's branch is judged across ALL its
+            # clones, not just the first one encountered. A branch absent from one
+            # clone may still be alive (unmerged) in another.
+            clones_by_origin = {}
+            for r in repos:
+                if args.repo and r.name != args.repo:
+                    continue
+                o = normalize_origin(repo_origin(r)) or str(r)
+                clones_by_origin.setdefault(o, []).append(r)
+
+            seen_f = set()
+            for origin_norm, clones in clones_by_origin.items():
+                proj = clones[0].name
+                for t in list_open_tickets(vault, ws["name"], proj):
+                    tbranch = t.get("branch") or ""
+                    if not tbranch:
+                        continue
+                    if args.branch and tbranch != args.branch:
+                        continue
+                    key = (origin_norm, tbranch)
+                    if key in seen_f:
+                        continue
+                    seen_f.add(key)
+
+                    merged = None
+                    alive = False
+                    ctx_repo = clones[0]
+                    for r in clones:
+                        if resolve_ref(r, tbranch) is None:
+                            continue
+                        alive = True
+                        ctx_repo = r
+                        mr = detect_merge(r, production_branches, tbranch)
+                        if mr:
+                            merged = mr
+                            break
+
+                    if merged:
+                        res = merged
+                        desc = f"merged into {res['integration']} ({res['method']})"
+                        landed_diff = diff_two_dot(ctx_repo, res["merge_base"], res["ref"])
+                    elif alive:
+                        # branch still exists in some clone and is not merged -> still open
+                        continue
+                    elif tbranch in done_branches:
+                        res = {"status": "manual", "integration": "", "method": "manual",
+                               "ref": None, "merge_base": None,
+                               "landed_date": datetime.now().strftime("%Y-%m-%d")}
+                        desc = "manual /kb-mark --done"
+                        landed_diff = ""
+                    else:
+                        res = {"status": "gone", "integration": "", "method": "gone",
+                               "ref": None, "merge_base": None,
+                               "landed_date": datetime.now().strftime("%Y-%m-%d")}
+                        desc = "branch gone (deleted on merge / removed everywhere)"
+                        landed_diff = ""
+                    r = ctx_repo
+                    print(f"  [finalize] {r.relative_to(wpath)}:{tbranch} — {desc}")
+                    offsets = load_session_offsets()
+                    hints = session_hints(tbranch, offsets)
+                    if hints:
+                        print(f"    session hints: {len(hints)} session(s) with new content")
+                    # synthesize a "fake commits" list from the resolution context so the
+                    # retrieval query carries some lexical content for finalize too
+                    f_commits = [f"\t\t{desc} on {res.get('integration','')}"]
+                    topk_l, topk_t = retrieve_for_branch(embed_store, tbranch, r.name, f_commits, landed_diff[:1500])
+                    pre_extracted = build_pre_extracted_block(topk_l, topk_t, Path(cfg["vault"])) if (topk_l or topk_t) else ""
+                    if pre_extracted:
+                        print(f"    [embed] injected: {len(topk_l)} learnings + {len(topk_t)} transcript turns")
+                    prompt = finalize_prompt(cfg, ws["name"], r, t, res, landed_diff, hints, pre_extracted=pre_extracted)
+                    rc, out, err = claude_run(prompt, max_turns, args.dry_run)
+                    finalizes += 1
+                    bumped = rc == 0 and not args.dry_run
+                    merge_compat = {"branch": res.get("integration", ""), "hash": "",
+                                    "subject": desc, "date": res["landed_date"]}
+                    report.add_finalize(ws["name"], r.name, str(r.relative_to(wpath)), t, merge_compat,
+                                        hints, bumped, rc, out, err)
+                    if bumped:
+                        bump_session_offsets(hints)
+                        clear_manual_done(tbranch)
+                    if rc != 0:
+                        errors += 1
+                        print(f"    claude rc={rc}")
+                    if out.strip():
+                        for line in out.splitlines()[:40]:
+                            print(f"    {line}")
+
+    print(f"\n=== done. captures={captures} finalizes={finalizes} errors={errors} dry_run={args.dry_run} ===")
+
+    # Notify the embed daemon (if running) that its on-disk store changed so
+    # the next interactive UserPromptSubmit retrieval sees the new learnings
+    # without having to wait for a daemon restart.
+    if kb_embed is not None and not args.dry_run:
+        try:
+            resp = kb_embed.daemon_request({"op": "reindex"}, timeout=3.0)
+            if resp and resp.get("ok"):
+                print(f"daemon reindex notified: chunks={resp.get('chunks','?')}")
+        except Exception as e:
+            print(f"daemon reindex notify failed (non-fatal): {type(e).__name__}: {e}")
+
+    if report.has_activity() and not args.dry_run:
+        report_path = Path.home() / ".claude" / "logs" / f"kb-sync-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.html"
+        report.write_html(vault, report_path)
+        print(f"\nreport: {report_path}")
+
+    # Version the vault locally (commit-only-if-changes; never pushes). The KB is
+    # a local-only repo by design — see KB-ARCHITECTURE.md (vault isolated from
+    # every remote). This is what makes the scheduled run also snapshot history.
+    if not args.dry_run:
+        commit_vault(vault)
+
+
+if __name__ == "__main__":
+    main()

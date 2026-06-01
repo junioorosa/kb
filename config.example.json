@@ -1,0 +1,11 @@
+{
+  "workspaces": [
+    { "name": "MyWorkspace", "path": "/absolute/path/to/your/code/repos" }
+  ],
+  "vault": "/absolute/path/to/your/kb-vault",
+  "default_branches": ["master", "main"],
+  "integration_branches": ["master", "dev", "develop", "main"],
+  "production_branches": ["master", "main"],
+  "since_hours": 24,
+  "max_turns": 30
+}
