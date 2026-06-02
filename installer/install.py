@@ -75,7 +75,12 @@ def step_version(cdir: Path, apply: bool) -> dict:
     rep = {"from": installed_version(cdir), "to": repo_version()}
     if apply:
         (cdir / ".kb-version").write_text(repo_version() + "\n", encoding="utf-8")
+        # Record where the clone lives so the deployed CLI (`kb manage`) can find
+        # the manager app, which runs from the source tree (Phase 2: no separate
+        # deploy of the manager — the repo is already required to install/update).
+        (cdir / ".kb-source").write_text(str(REPO_ROOT) + "\n", encoding="utf-8")
         rep["stamped"] = True
+        rep["source"] = str(REPO_ROOT)
     return rep
 
 

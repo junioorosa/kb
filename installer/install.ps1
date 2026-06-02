@@ -11,7 +11,8 @@
 #Requires -Version 5.1
 param(
     [switch]$Apply,
-    [string]$Time = "01:00"
+    [string]$Time = "01:00",
+    [switch]$NoManager
 )
 $ErrorActionPreference = "Stop"
 
@@ -63,8 +64,23 @@ if ($Apply) { $callArgs += "--apply" }
 Write-Host ""
 & $PyExe @callArgs
 $code = $LASTEXITCODE
+
 if (-not $Apply) {
     Write-Host ""
     Write-Host "Dry-run only. Re-run with -Apply to install/update." -ForegroundColor Cyan
+    exit $code
+}
+
+if ($code -ne 0) {
+    Write-Host "Install reported errors; not launching the manager." -ForegroundColor Yellow
+    exit $code
+}
+
+if (-not $NoManager) {
+    $server = Join-Path (Split-Path -Parent $InstallerDir) "manager\server.py"
+    Write-Host ""
+    Write-Host "Opening the KB manager in your browser..." -ForegroundColor Cyan
+    Write-Host "(This window runs the manager. Close it or press Ctrl+C when done.)"
+    & $PyExe @($PyArgs + @($server))
 }
 exit $code
