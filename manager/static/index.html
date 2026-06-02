@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KB Manager</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◈</span>
+        <span class="brand-name">KB</span>
+        <span class="brand-sub">Knowledge Base</span>
+      </div>
+      <div id="pills" class="pills">
+        <span class="pill pill-muted" id="pill-version">v—</span>
+        <span class="pill pill-muted" id="pill-daemon">daemon —</span>
+        <span class="pill pill-muted" id="pill-sched">sync —</span>
+      </div>
+    </header>
+
+    <main class="grid">
+      <!-- Status -->
+      <section class="card">
+        <h2>Status</h2>
+        <p class="card-sub">What's installed and running on this machine.</p>
+        <dl class="kv" id="status-kv">
+          <div><dt>Version</dt><dd id="st-version">—</dd></div>
+          <div><dt>Vault</dt><dd id="st-vault">—</dd></div>
+          <div><dt>Embedding daemon</dt><dd id="st-daemon">—</dd></div>
+          <div><dt>Scheduler</dt><dd id="st-sched">—</dd></div>
+        </dl>
+      </section>
+
+      <!-- Vault -->
+      <section class="card">
+        <h2>Vault</h2>
+        <p class="card-sub">Where your knowledge lives. Must be an existing folder.</p>
+        <label class="field">
+          <span>Vault path</span>
+          <input type="text" id="vault-input" placeholder="C:/Users/you/.kb/vault" spellcheck="false" />
+        </label>
+        <div class="row">
+          <button class="btn btn-primary" id="save-vault">Save vault</button>
+          <span class="inline-msg" id="vault-msg"></span>
+        </div>
+      </section>
+
+      <!-- Workspaces -->
+      <section class="card">
+        <h2>Workspaces</h2>
+        <p class="card-sub">Name → the folder holding the code repos KB watches.</p>
+        <div id="ws-list" class="ws-list"></div>
+        <div class="row">
+          <button class="btn btn-ghost" id="add-ws">+ Add workspace</button>
+          <button class="btn btn-primary" id="save-ws">Save workspaces</button>
+          <span class="inline-msg" id="ws-msg"></span>
+        </div>
+      </section>
+
+      <!-- Schedule -->
+      <section class="card">
+        <h2>Schedule</h2>
+        <p class="card-sub">Daily time KB syncs from git and reindexes (local time).</p>
+        <label class="field field-narrow">
+          <span>Daily sync time</span>
+          <input type="time" id="sched-input" value="01:00" />
+        </label>
+        <div class="row">
+          <button class="btn btn-primary" id="save-sched">Save schedule</button>
+          <span class="inline-msg" id="sched-msg"></span>
+        </div>
+      </section>
+
+      <!-- Integration -->
+      <section class="card card-wide">
+        <h2>Claude Code integration</h2>
+        <p class="card-sub">Wires the retrieval hooks into Claude Code. Turn off to mute KB instantly (kill-switch) without uninstalling.</p>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="integ-toggle" />
+            <span class="slider"></span>
+          </label>
+          <span id="integ-label" class="integ-label">—</span>
+          <span class="inline-msg" id="integ-msg"></span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span id="foot-msg">Local config app · 127.0.0.1 only</span>
+    </footer>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
