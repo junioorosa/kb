@@ -69,7 +69,7 @@ async function loadStatus() {
   if (d.up && d.model_loaded) { dk = "ok"; dtxt = "up · model ready"; }
   else if (d.up) { dk = "warn"; dtxt = "up · loading model"; }
   $("st-daemon").innerHTML = dot(dk) + dtxt;
-  pill("pill-daemon", "daemon " + (dk === "ok" ? "✓" : dk === "warn" ? "~" : "✗"),
+  pill("pill-daemon", "Embedding " + (dk === "ok" ? "✓" : dk === "warn" ? "~" : "✗"),
        dk === "ok" ? "pill-ok" : dk === "warn" ? "pill-warn" : "pill-bad");
 
   // scheduler

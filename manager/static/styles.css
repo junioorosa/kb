@@ -39,7 +39,6 @@ body {
   gap: 16px; margin-bottom: 32px; flex-wrap: wrap;
 }
 .brand { display: flex; align-items: baseline; gap: 10px; }
-.brand-mark { color: var(--accent); font-size: 20px; transform: translateY(2px); }
 .brand-name { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
 .brand-sub { color: var(--text-faint); font-size: 13px; font-weight: 500; }
 
