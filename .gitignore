@@ -10,3 +10,9 @@ kb-workspaces.json
 
 # Embedding cache / build artifacts
 .kb-cache/
+
+# Test fixtures still hardcode real company ticket slugs (REDACTED, REDACTED,
+# REDACTED, REDACTED) and a personal vault path. These are literals in the
+# TEST CODE — not the vault, not the engine. Held out of this public-bound repo until
+# the fixtures are synthetic (acme_1/gateway_2/...). Then tests/ gets tracked normally.
+tests/
