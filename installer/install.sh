@@ -12,10 +12,12 @@ set -euo pipefail
 
 TIME="01:00"
 APPLY=""
+NO_MANAGER=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --apply) APPLY="--apply"; shift ;;
         --time)  TIME="$2"; shift 2 ;;
+        --no-manager) NO_MANAGER=1; shift ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -44,8 +46,20 @@ echo ""
 # shellcheck disable=SC2086
 "$PY" "$HERE/install.py" --time "$TIME" $APPLY
 code=$?
+
 if [ -z "$APPLY" ]; then
     echo ""
     echo "Dry-run only. Re-run with --apply to install/update."
+    exit $code
+fi
+if [ "$code" -ne 0 ]; then
+    echo "Install reported errors; not launching the manager." >&2
+    exit $code
+fi
+if [ -z "$NO_MANAGER" ]; then
+    echo ""
+    echo "Opening the KB manager in your browser..."
+    echo "(This terminal runs the manager. Ctrl+C when done.)"
+    "$PY" "$(dirname "$HERE")/manager/server.py"
 fi
 exit $code

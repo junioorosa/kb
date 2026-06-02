@@ -63,9 +63,11 @@ def test_fresh_host_install():
             st = rep["settings"]
             check("settings reports 6 added", len(st.get("added", [])) == 6)
 
-            # version stamped
+            # version + source stamped (source lets the deployed `kb manage` find the clone)
             check(".kb-version stamped", (cdir / ".kb-version").exists())
             check(".kb-version == repo VERSION", (cdir / ".kb-version").read_text(encoding="utf-8").strip() == install.repo_version())
+            check(".kb-source stamped", (cdir / ".kb-source").exists())
+            check(".kb-source == repo root", (cdir / ".kb-source").read_text(encoding="utf-8").strip() == str(install.REPO_ROOT))
 
             # scheduler held to dry-run -> not registered, no global task touched
             check("scheduler not applied", rep["scheduler"].get("registered") is False)

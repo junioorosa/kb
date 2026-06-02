@@ -6,9 +6,22 @@ command does both first-install and updates — re-running is always safe.
 
 ## Install / update
 
+Clone the repo, then:
+
+**Easiest — double-click** (installs/updates KB **and opens the manager** in your
+browser to configure it):
+
+| OS | Double-click |
+|----|--------------|
+| Windows | `install.cmd` |
+| macOS   | `install.command` (Finder runs it in Terminal) |
+| Linux   | no standard double-click — run `bash installer/install.sh --apply` |
+
+**From a terminal** (dry-run first to see what would change):
+
 ```bash
 # Windows
-powershell -ExecutionPolicy Bypass -File installer\install.ps1            # dry-run (shows what would change)
+powershell -ExecutionPolicy Bypass -File installer\install.ps1            # dry-run
 powershell -ExecutionPolicy Bypass -File installer\install.ps1 -Apply     # install / update
 
 # macOS / Linux
@@ -16,8 +29,11 @@ bash installer/install.sh            # dry-run
 bash installer/install.sh --apply    # install / update
 ```
 
-Pick the daily sync time with `-Time 02:30` (PowerShell) / `--time 02:30` (bash).
-Default is `01:00`.
+Flags: daily sync time `-Time 02:30` / `--time 02:30` (default `01:00`); skip the
+auto-launch of the manager with `-NoManager` / `--no-manager`.
+
+**Re-open the manager later:** `kb manage` (the install records the clone path so
+the deployed CLI finds it), or directly `python <clone>/manager/server.py`.
 
 The bootstrap script only locates Python and installs the optional deps
 (`fastembed`, `numpy`, `tiktoken` — semantic retrieval degrades to BM25 without
@@ -35,7 +51,9 @@ them). All the real work is in the OS-agnostic orchestrator `install.py`.
    before writing.
 3. **scheduler** — registers the daily `kb-sync` job (Windows Task Scheduler /
    macOS launchd / Linux cron).
-4. **version** — stamps `~/.claude/.kb-version` with this repo's `VERSION`.
+4. **version** — stamps `~/.claude/.kb-version` with this repo's `VERSION`, and
+   records the clone path in `~/.claude/.kb-source` so `kb manage` can find the
+   manager (which runs from the clone).
 5. **config** — checks `~/.claude/kb-workspaces.json`. It never fabricates a
    vault path; if the config is missing it tells you to set `vault` yourself
    (copy `config.example.json`). KB hooks degrade safely (no injection) until then.
