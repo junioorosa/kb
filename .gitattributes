@@ -1,0 +1,8 @@
+# Deterministic line endings so a teammate's checkout doesn't break bash hooks.
+# Shell + Python + Markdown are forced to LF (bash on Windows/Git Bash and the
+# Python hooks expect LF); PowerShell stays CRLF.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary
