@@ -38,4 +38,4 @@ without them), `tiktoken` (exact token stats; falls back to an estimate).
 
 ## License
 
-TBD (all rights reserved until a license is added).
+Not yet decided — all rights reserved until a license is added.
