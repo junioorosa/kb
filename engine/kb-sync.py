@@ -406,6 +406,103 @@ def author_commits_for_branch(repo: Path, branch: str, author: str, since_spec: 
     return [line for line in r.stdout.split("\n") if line.strip()]
 
 
+def _since_window_args(since_spec: dict):
+    """The `--since`/range-window flags for a date-kind since_spec. Commit-kind has
+    no date window (it's a sha..branch range), so returns []."""
+    if since_spec.get("kind") == "commit":
+        return []
+    if since_spec.get("hours") is not None:
+        return [f"--since={since_spec['hours']} hours ago"]
+    return [f"--since={since_spec['iso']}"]
+
+
+def merge_parent_base(repo: Path, branch: str, int_refs):
+    """If `branch` was integrated via a MERGE COMMIT on any integration ref, return that
+    merge's first-parent SHA (the integration side). Then `<base>..branch` is EXACTLY the
+    branch's own commits — no trunk bleed. Returns None for ff/squash merges (no merge
+    commit references the branch tip as a parent).
+
+    Found by scanning each int_ref's recent merges for one whose non-first parent is the
+    branch tip — i.e. the commit that merged this branch in. First-parent = the trunk it
+    landed on, so excluding it isolates the branch's contribution."""
+    tip = run_git(["rev-parse", branch], repo).stdout.strip()
+    if not tip:
+        return None
+    for ref in int_refs:
+        r = run_git(["rev-list", "--merges", "--parents", "-n", "500", ref], repo)
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            # "<merge> <p1> <p2> ...": tip as a 2nd+ parent => this merge brought it in.
+            if len(parts) >= 3 and tip in parts[2:]:
+                return parts[1]
+    return None
+
+
+def _landed_range(branch: str, base, since_spec: dict):
+    """Range + window flags for mining a merged branch's own work.
+      - base given (merge first-parent): `base..branch`, no window — exact own-range.
+      - base None (ff/squash, no merge commit): range=branch + --since window, which also
+        picks up the author's trunk commits in the window (no structural way to isolate
+        'branch-own' post-ff without reflog); the short window bounds that bleed."""
+    if base:
+        return [f"{base}..{branch}"], []
+    return [branch], _since_window_args(since_spec)
+
+
+def author_landed_commits(repo: Path, branch: str, author: str, since_spec: dict, base=None):
+    """The author's own non-merge commits for a merged branch (see _landed_range).
+    Commit-anchored on purpose: once merged, the tip is an ancestor of the integration
+    ref, so a ref-anchored `<int_ref>..branch` collapses to empty."""
+    rng, win = _landed_range(branch, base, since_spec)
+    args = ["log", *rng, "--no-merges", f"--author={author}", *win,
+            "--pretty=format:%H%x09%ad%x09%s", "--date=iso-strict"]
+    r = run_git(args, repo)
+    return [line for line in r.stdout.split("\n") if line.strip()]
+
+
+def author_landed_diff(repo: Path, branch: str, author: str, since_spec: dict, base=None, max_chars: int = 60000):
+    """Per-commit patches of the author's own commits for a merged branch (mining diff)."""
+    rng, win = _landed_range(branch, base, since_spec)
+    args = ["log", *rng, "--no-merges", f"--author={author}", *win,
+            "-p", "--reverse", "--pretty=format:%n=== commit %h %ad %s ===%n", "--date=short"]
+    out = run_git(args, repo, timeout=120).stdout
+    if len(out) > max_chars:
+        return out[:max_chars] + f"\n\n[... truncated, full diff was {len(out)} chars ...]"
+    return out
+
+
+def author_landed_stat(repo: Path, branch: str, author: str, since_spec: dict, base=None):
+    """Diff stat for the author's own commits for a merged branch."""
+    rng, win = _landed_range(branch, base, since_spec)
+    args = ["log", *rng, "--no-merges", f"--author={author}", *win, "--stat", "--pretty=format:"]
+    return run_git(args, repo, timeout=60).stdout.strip()
+
+
+def merged_ticketless_backfill(repo: Path, branch: str, author: str, since_spec: dict,
+                               int_refs, vault: Path, workspace: str, project: str):
+    """Detect the capture<->finalize crack and return (commits, base) to backfill, or None.
+
+    The crack: a branch committed AND merged within one sync interval is invisible to
+    BOTH passes — capture finds zero own-commits (`--not <integration>` excludes the now-
+    merged commits) and finalize has no ticket to resolve (capture never created one).
+
+    Returns (commits, base) — `base` is the merge first-parent for an exact, bleed-free
+    own-range (None for ff/squash, where mining falls back to the windowed range) — when:
+      - normal capture is empty for this branch (its work is integration-reachable = merged),
+      - no KB ticket exists yet for the branch (any status),
+      - the author has own commits on the branch to mine.
+    Self-contained (re-checks capture-empty) so it's unit-testable in isolation."""
+    if author_commits_for_branch(repo, branch, author, since_spec, int_refs):
+        return None  # not merged — normal capture handles it
+    if ticket_status_for_branch(vault, workspace, project, branch) is not None:
+        return None  # already ticketed (any status) — not our gap
+    base = merge_parent_base(repo, branch, int_refs)
+    commits = author_landed_commits(repo, branch, author, since_spec, base=base)
+    if not commits:
+        return None
+    return commits, base
+
+
 def diff_stat(repo: Path, branch: str, base: str):
     r = run_git(["diff", "--stat", f"{base}...{branch}"], repo, timeout=60)
     return r.stdout.strip()
@@ -1301,22 +1398,31 @@ def main():
                     else:
                         since_spec = effective_since(state, origin_norm, branch, r)
                     commits = author_commits_for_branch(r, branch, email, since_spec, int_refs)
+                    backfill, mine_base = False, None
                     if not commits:
-                        print(f"  [skip] {r.relative_to(wpath)}:{branch} — no new authored commits to capture "
-                              f"(window={since_spec['source']}, excl. merges + {', '.join(int_refs) or 'no integration ref'})")
-                        continue
+                        # Backfill the capture<->finalize crack: a branch merged within
+                        # one sync interval has zero own-commits here (already integration-
+                        # reachable) and no ticket, so it would slip past both passes.
+                        bf = merged_ticketless_backfill(r, branch, email, since_spec, int_refs,
+                                                        vault, ws["name"], r.name)
+                        if not bf:
+                            print(f"  [skip] {r.relative_to(wpath)}:{branch} — no new authored commits to capture "
+                                  f"(window={since_spec['source']}, excl. merges + {', '.join(int_refs) or 'no integration ref'})")
+                            continue
+                        commits, mine_base = bf
+                        backfill = True
                     base = nearest_integration_base(r, branch, int_refs) or resolve_default_branch(r, default_candidates)
                     tr = run_git(["log", branch, "-1", "--pretty=format:%at"], r)
                     try:
                         ts = int(tr.stdout.strip())
                     except ValueError:
                         ts = 0
-                    candidates.append((ts, origin_norm, branch, r, tipo, slug, folder_rel, commits, email, since_spec, base))
+                    candidates.append((ts, origin_norm, branch, r, tipo, slug, folder_rel, commits, email, since_spec, base, backfill, mine_base))
 
             candidates.sort(reverse=True)
             exp_branches = manually_experimental_branches()
             seen = set()
-            for ts, origin_norm, branch, repo, tipo, slug, folder_rel, commits, email, since_spec, base in candidates:
+            for ts, origin_norm, branch, repo, tipo, slug, folder_rel, commits, email, since_spec, base, backfill, mine_base in candidates:
                 key = (origin_norm, branch)
                 if key in seen:
                     print(f"  [dup-skip] {repo.relative_to(wpath)}:{branch} — already processed in fresher clone")
@@ -1342,9 +1448,17 @@ def main():
                 if not base:
                     print(f"  [skip] {repo.relative_to(wpath)}:{branch} — no integration base / default branch")
                     continue
-                print(f"  [capture] {repo.relative_to(wpath)}:{branch} — {len(commits)} commits vs {base} (window: {since_spec['source']})")
-                stat = diff_stat(repo, branch, base)
-                diff = diff_full(repo, branch, base)
+                # Backfill mines commit-anchored (range=branch) because the branch is
+                # already merged — a ref-anchored base...branch diff would be empty.
+                src_label = "backfill-merged" if backfill else since_spec["source"]
+                kind = "backfill" if backfill else "capture"
+                print(f"  [{kind}] {repo.relative_to(wpath)}:{branch} — {len(commits)} commits vs {base} (window: {src_label})")
+                if backfill:
+                    stat = author_landed_stat(repo, branch, email, since_spec, base=mine_base)
+                    diff = author_landed_diff(repo, branch, email, since_spec, base=mine_base)
+                else:
+                    stat = diff_stat(repo, branch, base)
+                    diff = diff_full(repo, branch, base)
                 offsets = load_session_offsets()
                 hints = session_hints(branch, offsets)
                 if hints:
@@ -1358,7 +1472,7 @@ def main():
                 captures += 1
                 bumped = rc == 0 and not args.dry_run
                 report.add_capture(ws["name"], repo.name, str(repo.relative_to(wpath)), branch,
-                                   slug, slug, len(commits), hints, bumped, rc, out, err, since_spec["source"])
+                                   slug, slug, len(commits), hints, bumped, rc, out, err, src_label)
                 if rc != 0:
                     errors += 1
                     print(f"    claude rc={rc}")
