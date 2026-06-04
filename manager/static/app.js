@@ -244,12 +244,15 @@ async function loadSyncHistory() {
   const r = runs[0];
   dot.className = "sync-dot " + (r.errors ? "bad" : "ok");
   const when = (r.ts || "").replace("T", " ").slice(0, 16);
-  txt.innerHTML = `Last sync <b>${esc(when)}</b> · ${r.captures} captured` +
+  const repos = r.repos ? ` · ${r.repos.fetched}/${r.repos.discovered} repos` : "";
+  txt.innerHTML = `Last sync <b>${esc(when)}</b>${repos} · ${r.captures} captured` +
     (r.backfills ? ` (${r.backfills} backfill)` : "") + ` · ${r.finalizes} resolved` +
-    (r.errors ? ` · <span class="bad-txt">${r.errors} errors</span>` : "");
-  const learned = (r.learned_files || []).length;
-  det.textContent = learned ? `${learned} file${learned > 1 ? "s" : ""} learned this run` :
-    `${runs.length} run${runs.length > 1 ? "s" : ""} on record`;
+    (r.errors ? ` · <span class="bad-txt">${r.errors} error${r.errors > 1 ? "s" : ""}</span>` : "");
+  const L = r.learned || {};
+  const nl = (L.learnings || []).length, nt = (L.tickets || []).length;
+  det.textContent = (nl || nt)
+    ? `${nl} learning${nl !== 1 ? "s" : ""}, ${nt} ticket${nt !== 1 ? "s" : ""} this run`
+    : `${runs.length} run${runs.length > 1 ? "s" : ""} on record`;
 }
 
 async function loadLearnings() {

@@ -1095,9 +1095,16 @@ class RunReport:
         self.finalizes: list[dict] = []
         self.errors: list[dict] = []
         self.fetch_failures: list[dict] = []
+        self.repos_discovered = 0
+        self.repos_fetched = 0
 
     def add_fetch_failure(self, workspace: str, repo_rel: str, origin: str):
         self.fetch_failures.append({"workspace": workspace, "repo_rel": repo_rel, "origin": origin})
+
+    def note_scan(self, discovered: int, fetched: int):
+        """Accumulate repo scan/fetch counts across workspaces (sync-health scope)."""
+        self.repos_discovered += discovered
+        self.repos_fetched += fetched
 
     def add_capture(self, workspace: str, repo_name: str, repo_rel: str, branch: str,
                     ticket_id: str, slug: str, commits: int, hints: list,
@@ -1167,24 +1174,38 @@ class RunReport:
                    for c in self.captures]
         touched += [{"repo": f.get("repo_name", ""), "branch": f.get("branch", ""), "action": "finalize"}
                     for f in self.finalizes]
-        errors = sum(1 for c in self.captures if c.get("rc")) + sum(1 for f in self.finalizes if f.get("rc"))
+        errors_detail = (
+            [{"repo": c.get("repo_name", ""), "branch": c.get("branch", ""), "action": action(c), "rc": c.get("rc")}
+             for c in self.captures if c.get("rc")]
+            + [{"repo": f.get("repo_name", ""), "branch": f.get("branch", ""), "action": "finalize", "rc": f.get("rc")}
+               for f in self.finalizes if f.get("rc")]
+        )
         learned = []
         try:
             if vault and Path(vault).exists():
                 learned = [p.relative_to(vault).as_posix() for p in self.changed_files(Path(vault))]
         except Exception:
             learned = []
+        # Split touched files into new/updated knowledge so the manager can say
+        # "this run added N learnings, touched M tickets" and link to them.
+        learned_split = {
+            "learnings": [p for p in learned if "/Learnings/" in p],
+            "tickets": [p for p in learned if p.endswith("/_index.md")],
+        }
         return {
             "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
             "duration_s": int(time.time() - self.start_ts),
             "dry_run": bool(dry_run),
+            "repos": {"discovered": self.repos_discovered, "fetched": self.repos_fetched},
             "captures": len(self.captures),
             "backfills": sum(1 for c in self.captures if action(c) == "backfill"),
             "finalizes": len(self.finalizes),
-            "errors": errors,
+            "errors": len(errors_detail),
+            "errors_detail": errors_detail,
             "fetch_failures": [f.get("repo_rel", "") for f in self.fetch_failures],
             "touched": touched,
             "learned_files": learned,
+            "learned": learned_split,
         }
 
     def write_html(self, vault: Path, out_path: Path):
@@ -1397,6 +1418,7 @@ def main():
                 # repos with no remote are skipped (local is authoritative, no staleness).
                 fetch_failed.append(r)
         print(f"  fetched (prune) {ok_count}/{len(repos)} repos")
+        report.note_scan(len(repos), ok_count)
         for r in fetch_failed:
             rel = r.relative_to(wpath)
             print(f"    [warn] fetch FAILED (origin unreachable): {rel} — capture/finalize using STALE refs")
