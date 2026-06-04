@@ -39,8 +39,9 @@ def test_fresh_host_install():
         cdir = Path(d) / ".claude"  # does not exist yet
         os.environ["CLAUDE_CONFIG_DIR"] = str(cdir)
         try:
-            # Wired orchestrator, real apply, scheduler held to dry-run (footgun guard).
-            rep = install.run(apply=True, time_hhmm="01:00", scheduler_apply=False)
+            # Wired orchestrator, real apply, scheduler + shortcut held to dry-run
+            # (footgun guard: both touch global state outside the temp claude_dir).
+            rep = install.run(apply=True, time_hhmm="01:00", scheduler_apply=False, shortcut_apply=False)
 
             check("claude_dir is the temp dir", rep["claude_dir"] == str(cdir))
 
@@ -78,7 +79,7 @@ def test_fresh_host_install():
             check("no kb-workspaces.json created", not (cdir / "kb-workspaces.json").exists())
 
             # idempotency: a second wired apply changes nothing
-            rep2 = install.run(apply=True, time_hhmm="01:00", scheduler_apply=False)
+            rep2 = install.run(apply=True, time_hhmm="01:00", scheduler_apply=False, shortcut_apply=False)
             check("second apply deploys 0", rep2["deploy"].get("wrote") == 0)
             check("second apply adds 0 settings", len(rep2["settings"].get("added", [])) == 0)
         finally:
