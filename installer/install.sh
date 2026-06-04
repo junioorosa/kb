@@ -55,5 +55,5 @@ if [ "$code" -ne 0 ]; then
     exit $code
 fi
 echo ""
-echo "Done. Open the 'KB Manager' shortcut (Desktop / applications) to configure KB."
+echo "Done. Search your apps (Spotlight / app launcher) for 'KB Manager' to open the config UI."
 exit $code

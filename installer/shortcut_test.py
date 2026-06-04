@@ -31,12 +31,13 @@ def check(name, cond):
 
 def test_dry_run():
     print("test_dry_run")
-    # Isolate HOME so the asserted path is clean temp space — otherwise "nothing
-    # created" would read the real Desktop, which a live install may have populated.
-    prev = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME")}
+    # Isolate HOME/APPDATA so the asserted path is clean temp space — otherwise
+    # "nothing created" could read a real app-menu location populated by an install.
+    prev = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME", "APPDATA")}
     with tempfile.TemporaryDirectory() as d:
         os.environ["USERPROFILE"] = d
         os.environ["HOME"] = d
+        os.environ["APPDATA"] = str(Path(d) / "AppData" / "Roaming")
         try:
             rep = shortcut.create_shortcut(REPO, dry_run=True)
             check("dry_run flagged", rep.get("dry_run") is True)
@@ -57,24 +58,29 @@ def test_dry_run():
 
 def test_real_create():
     print("test_real_create")
-    prev = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME")}
+    prev = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME", "APPDATA")}
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
-        (home / "Desktop").mkdir(parents=True, exist_ok=True)
         os.environ["USERPROFILE"] = str(home)
         os.environ["HOME"] = str(home)
+        os.environ["APPDATA"] = str(home / "AppData" / "Roaming")
         try:
             rep = shortcut.create_shortcut(REPO, dry_run=False)
             check("create reported success", rep.get("created") is True)
             if rep.get("created"):
                 p = Path(rep["path"])
-                check("shortcut file exists", p.exists())
-                check("shortcut is under the temp home", str(home) in str(p))
-                check("shortcut non-empty", p.exists() and p.stat().st_size > 0)
-                if sys.platform != "win32":
-                    # script-based shortcuts embed the server path verbatim and are executable
-                    check("script references server.py", "manager" in p.read_text(encoding="utf-8"))
-                    check("script is executable", os.access(p, os.X_OK))
+                check("artifact exists", p.exists())
+                check("artifact is under the temp home", str(home) in str(p))
+                if sys.platform == "win32":
+                    check("registered in Start Menu Programs", "Start Menu" in str(p) and p.suffix == ".lnk")
+                    check("shortcut non-empty", p.stat().st_size > 0)
+                elif sys.platform == "darwin":
+                    exe = p / "Contents" / "MacOS" / "kb-manager"
+                    check("app bundle has launcher", exe.exists() and "manager" in exe.read_text(encoding="utf-8"))
+                    check("launcher is executable", exe.exists() and os.access(exe, os.X_OK))
+                else:
+                    check("desktop entry references server.py", "manager" in p.read_text(encoding="utf-8"))
+                    check("desktop entry is executable", os.access(p, os.X_OK))
             else:
                 print(f"    (create error: {rep.get('error')})")
         finally:

@@ -76,5 +76,5 @@ if ($code -ne 0) {
 }
 
 Write-Host ""
-Write-Host "Done. Open the 'KB Manager' shortcut on your Desktop to configure KB." -ForegroundColor Green
+Write-Host "Done. Press the Windows key and type 'KB Manager' to open the config UI." -ForegroundColor Green
 exit $code
