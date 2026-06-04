@@ -20,6 +20,12 @@
       </div>
     </header>
 
+    <nav class="tabs">
+      <button class="tab is-active" data-view="knowledge">Knowledge</button>
+      <button class="tab" data-view="config">Config</button>
+    </nav>
+
+    <div id="view-config" class="view hidden">
     <main class="grid">
       <!-- Status -->
       <section class="card">
@@ -87,9 +93,55 @@
         </div>
       </section>
     </main>
+    </div><!-- /view-config -->
+
+    <div id="view-knowledge" class="view">
+      <!-- Sync health strip -->
+      <div class="sync-strip" id="sync-strip">
+        <span class="sync-dot" id="sync-dot"></span>
+        <span id="sync-text" class="sync-text">Loading sync history…</span>
+        <span class="sync-spacer"></span>
+        <span id="sync-detail" class="sync-detail"></span>
+      </div>
+
+      <!-- Overview -->
+      <section class="kn-overview" id="kn-overview">
+        <div class="stat"><div class="stat-num" id="ov-learnings">—</div><div class="stat-lab">learnings</div></div>
+        <div class="stat"><div class="stat-num" id="ov-tickets">—</div><div class="stat-lab">tickets</div></div>
+        <div class="stat stat-status" id="ov-status"></div>
+        <div class="stat stat-growth">
+          <div class="stat-lab">learnings / month</div>
+          <div class="growth" id="ov-growth"></div>
+        </div>
+      </section>
+
+      <!-- Tag chips -->
+      <div class="tagbar" id="ov-tags"></div>
+
+      <!-- Browser: filters + list | reader -->
+      <section class="kn-browser">
+        <div class="kn-list-pane">
+          <div class="kn-filters">
+            <input type="text" id="kn-search" placeholder="Search learnings…" spellcheck="false" />
+            <select id="kn-project"><option value="">All projects</option></select>
+            <select id="kn-scope">
+              <option value="">All scopes</option>
+              <option value="ticket">ticket</option>
+              <option value="project">project</option>
+              <option value="workspace">workspace</option>
+            </select>
+          </div>
+          <div class="kn-count" id="kn-count"></div>
+          <div class="kn-list" id="kn-list"></div>
+        </div>
+        <div class="kn-reader" id="kn-reader">
+          <div class="kn-reader-empty">Select a learning to read it.</div>
+        </div>
+      </section>
+    </div><!-- /view-knowledge -->
 
     <footer class="foot">
-      <span id="foot-msg">Local config app · 127.0.0.1 only</span>
+      <span id="foot-msg">Local app · 127.0.0.1 only · read-only over your vault</span>
     </footer>
   </div>
   <div id="toast" class="toast"></div>

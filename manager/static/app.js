@@ -176,6 +176,136 @@ async function loadIntegration() {
   $("integ-label").textContent = "On";
 }
 
+// --- Knowledge view -------------------------------------------------------
+let KN_LOADED = false;
+const KN = { project: "", scope: "", tag: "", q: "" };
+
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function switchView(view) {
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("is-active", t.dataset.view === view));
+  $("view-config").classList.toggle("hidden", view !== "config");
+  $("view-knowledge").classList.toggle("hidden", view !== "knowledge");
+  if (view === "knowledge" && !KN_LOADED) { KN_LOADED = true; loadKnowledge(); }
+}
+
+async function loadKnowledge() {
+  loadSyncHistory();
+  let ov;
+  try { ov = await api("GET", "/api/knowledge/overview"); }
+  catch (e) { toast("knowledge: " + e.message, "err"); return; }
+  renderOverview(ov);
+  loadLearnings();
+}
+
+function renderOverview(ov) {
+  $("ov-learnings").textContent = ov.totals.learnings;
+  $("ov-tickets").textContent = ov.totals.tickets;
+
+  const st = ov.tickets_by_status || {};
+  const order = ["resolved", "in-progress", "open", "experimental", "discarded"];
+  const keys = Object.keys(st).sort((a, b) => (order.indexOf(a) + 1 || 9) - (order.indexOf(b) + 1 || 9));
+  $("ov-status").innerHTML = `<div class="stat-lab">tickets by status</div><div class="status-chips">` +
+    keys.map((k) => `<span class="schip schip-${k.replace(/[^a-z]/g, "")}">${st[k]} ${esc(k)}</span>`).join("") + `</div>`;
+
+  const g = ov.growth || [];
+  const max = Math.max(1, ...g.map((x) => x.learnings));
+  $("ov-growth").innerHTML = g.map((x) =>
+    `<div class="grow-row"><span class="grow-m">${esc(x.month)}</span>` +
+    `<span class="grow-bar"><i style="width:${Math.round((x.learnings / max) * 100)}%"></i></span>` +
+    `<span class="grow-n">${x.learnings}</span></div>`).join("") || `<div class="muted">no dated learnings</div>`;
+
+  const tags = ov.top_tags || [];
+  $("ov-tags").innerHTML = tags.map(([t, n]) =>
+    `<button class="chip" data-tag="${esc(t)}">${esc(t)}<span class="chip-n">${n}</span></button>`).join("");
+  $("ov-tags").querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => {
+    KN.tag = (KN.tag === c.dataset.tag) ? "" : c.dataset.tag;
+    $("ov-tags").querySelectorAll(".chip").forEach((x) => x.classList.toggle("is-active", x.dataset.tag === KN.tag));
+    loadLearnings();
+  }));
+
+  const sel = $("kn-project");
+  sel.innerHTML = `<option value="">All projects</option>` +
+    (ov.by_project || []).map((p) => `<option value="${esc(p.project)}">${esc(p.project)} (${p.learnings})</option>`).join("");
+}
+
+async function loadSyncHistory() {
+  let runs = [];
+  try { runs = (await api("GET", "/api/sync-history")).runs || []; } catch (_) {}
+  const dot = $("sync-dot"), txt = $("sync-text"), det = $("sync-detail");
+  if (!runs.length) {
+    dot.className = "sync-dot warn";
+    txt.textContent = "No sync recorded yet — the first scheduled run will populate this.";
+    det.textContent = ""; return;
+  }
+  const r = runs[0];
+  dot.className = "sync-dot " + (r.errors ? "bad" : "ok");
+  const when = (r.ts || "").replace("T", " ").slice(0, 16);
+  txt.innerHTML = `Last sync <b>${esc(when)}</b> · ${r.captures} captured` +
+    (r.backfills ? ` (${r.backfills} backfill)` : "") + ` · ${r.finalizes} resolved` +
+    (r.errors ? ` · <span class="bad-txt">${r.errors} errors</span>` : "");
+  const learned = (r.learned_files || []).length;
+  det.textContent = learned ? `${learned} file${learned > 1 ? "s" : ""} learned this run` :
+    `${runs.length} run${runs.length > 1 ? "s" : ""} on record`;
+}
+
+async function loadLearnings() {
+  const p = new URLSearchParams();
+  if (KN.project) p.set("project", KN.project);
+  if (KN.scope) p.set("scope", KN.scope);
+  if (KN.tag) p.set("tag", KN.tag);
+  if (KN.q) p.set("q", KN.q);
+  let items = [];
+  try { items = (await api("GET", "/api/knowledge/learnings?" + p.toString())).learnings || []; }
+  catch (e) { toast("learnings: " + e.message, "err"); return; }
+  renderList(items);
+}
+
+function renderList(items) {
+  $("kn-count").textContent = `${items.length} learning${items.length === 1 ? "" : "s"}` +
+    (KN.tag ? ` · #${KN.tag}` : "");
+  const list = $("kn-list");
+  if (!items.length) { list.innerHTML = `<div class="muted pad">No matches.</div>`; return; }
+  list.innerHTML = items.map((r) =>
+    `<button class="kn-item" data-path="${esc(r.rel_path)}">` +
+    `<div class="kn-item-top"><span class="kn-item-name">${esc(r.description || r.name)}</span>` +
+    `<span class="kn-item-date">${esc(r.date || "")}</span></div>` +
+    `<div class="kn-item-meta"><span class="scope-tag scope-${esc(r.scope)}">${esc(r.scope)}</span>` +
+    `<span class="kn-item-proj">${esc(r.project || r.workspace)}</span>` +
+    (r.tags || []).slice(0, 4).map((t) => `<span class="mini-tag">${esc(t)}</span>`).join("") +
+    `</div></button>`).join("");
+  list.querySelectorAll(".kn-item").forEach((b) => b.addEventListener("click", () => {
+    list.querySelectorAll(".kn-item").forEach((x) => x.classList.remove("is-active"));
+    b.classList.add("is-active");
+    openItem(b.dataset.path);
+  }));
+}
+
+async function openItem(rel) {
+  const reader = $("kn-reader");
+  reader.innerHTML = `<div class="kn-reader-empty">Loading…</div>`;
+  let it;
+  try { it = await api("GET", "/api/knowledge/item?path=" + encodeURIComponent(rel)); }
+  catch (e) { reader.innerHTML = `<div class="kn-reader-empty">Error: ${esc(e.message)}</div>`; return; }
+  const fm = it.frontmatter || {};
+  const tags = Array.isArray(fm.tags) ? fm.tags : [];
+  reader.innerHTML =
+    `<div class="kn-read-head">` +
+    `<div class="kn-read-title">${esc(it.title)}</div>` +
+    `<div class="kn-read-sub"><span class="scope-tag scope-${esc(it.scope)}">${esc(it.scope)}</span>` +
+    `<span>${esc(it.project || "")}</span>` +
+    (fm.ticket_origin ? `<span class="muted">ticket ${esc(fm.ticket_origin)}</span>` : "") + `</div>` +
+    (tags.length ? `<div class="kn-read-tags">` + tags.map((t) => `<span class="mini-tag">${esc(t)}</span>`).join("") + `</div>` : "") +
+    `<div class="kn-read-path">${esc(it.rel_path)}</div></div>` +
+    `<article class="prose">${it.html}</article>`;  // html is server-rendered + escaped
+  reader.scrollTop = 0;
+}
+
+let _searchTimer = null;
+
 // --- Wire up --------------------------------------------------------------
 function init() {
   if (!TOKEN) { toast("missing token — relaunch from the server URL", "err"); }
@@ -184,9 +314,20 @@ function init() {
   $("save-ws").addEventListener("click", saveWorkspaces);
   $("save-sched").addEventListener("click", saveSchedule);
   $("integ-toggle").addEventListener("change", toggleIntegration);
+
+  document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => switchView(t.dataset.view)));
+  $("kn-project").addEventListener("change", (e) => { KN.project = e.target.value; loadLearnings(); });
+  $("kn-scope").addEventListener("change", (e) => { KN.scope = e.target.value; loadLearnings(); });
+  $("kn-search").addEventListener("input", (e) => {
+    KN.q = e.target.value.trim();
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(loadLearnings, 220);
+  });
+
   loadStatus();
   loadConfig();
   loadIntegration();
+  switchView("knowledge");  // knowledge is the default landing view
 }
 
 document.addEventListener("DOMContentLoaded", init);
