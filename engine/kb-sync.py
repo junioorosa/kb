@@ -33,7 +33,9 @@ CONFIG = Path.home() / ".claude" / "kb-workspaces.json"
 STATE_DIR = Path.home() / ".claude" / "state"
 SESSION_OFFSETS = STATE_DIR / "kb-session-offsets.json"
 RUN_STATE = STATE_DIR / "kb-run-state.json"
+SYNC_HISTORY = STATE_DIR / "kb-sync-history.json"
 HWM_CAP_DAYS = 7
+SYNC_HISTORY_CAP = 100  # keep the last N run records (rolling)
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 FM_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
@@ -195,6 +197,28 @@ def load_run_state() -> dict:
 def save_run_state(data: dict) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     RUN_STATE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def append_sync_history(record: dict, cap: int = SYNC_HISTORY_CAP) -> None:
+    """Append one run record to the rolling sync-history sidecar (last `cap` kept).
+    Atomic write; never fatal — a history hiccup must not fail the sync."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        hist = []
+        if SYNC_HISTORY.exists():
+            try:
+                loaded = json.loads(SYNC_HISTORY.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    hist = loaded
+            except json.JSONDecodeError:
+                hist = []
+        hist.append(record)
+        hist = hist[-cap:]
+        tmp = SYNC_HISTORY.with_name(SYNC_HISTORY.name + ".tmp")
+        tmp.write_text(json.dumps(hist, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, SYNC_HISTORY)
+    except Exception as e:
+        print(f"sync-history append failed (non-fatal): {type(e).__name__}: {e}")
 
 
 def ensure_installed_marker(state: dict) -> dict:
@@ -1132,6 +1156,37 @@ class RunReport:
     def has_activity(self) -> bool:
         return bool(self.captures or self.finalizes)
 
+    def to_record(self, vault: Path, dry_run: bool) -> dict:
+        """A compact, structured record of this run for the sync-history sidecar the
+        manager reads. `learned_files` (vault .md touched this run, via changed_files)
+        links a run to the actual knowledge it produced — the 'what did this sync
+        teach' signal — reliable because it's mtime within THIS run's window."""
+        def action(c):
+            return "backfill" if c.get("since_source") == "backfill-merged" else "capture"
+        touched = [{"repo": c.get("repo_name", ""), "branch": c.get("branch", ""), "action": action(c)}
+                   for c in self.captures]
+        touched += [{"repo": f.get("repo_name", ""), "branch": f.get("branch", ""), "action": "finalize"}
+                    for f in self.finalizes]
+        errors = sum(1 for c in self.captures if c.get("rc")) + sum(1 for f in self.finalizes if f.get("rc"))
+        learned = []
+        try:
+            if vault and Path(vault).exists():
+                learned = [p.relative_to(vault).as_posix() for p in self.changed_files(Path(vault))]
+        except Exception:
+            learned = []
+        return {
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "duration_s": int(time.time() - self.start_ts),
+            "dry_run": bool(dry_run),
+            "captures": len(self.captures),
+            "backfills": sum(1 for c in self.captures if action(c) == "backfill"),
+            "finalizes": len(self.finalizes),
+            "errors": errors,
+            "fetch_failures": [f.get("repo_rel", "") for f in self.fetch_failures],
+            "touched": touched,
+            "learned_files": learned,
+        }
+
     def write_html(self, vault: Path, out_path: Path):
         changed = self.changed_files(vault)
         end_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1580,6 +1635,10 @@ def main():
                             print(f"    {line}")
 
     print(f"\n=== done. captures={captures} finalizes={finalizes} errors={errors} dry_run={args.dry_run} ===")
+
+    # Record this run for the manager's sync-history view (real runs only).
+    if not args.dry_run:
+        append_sync_history(report.to_record(vault, args.dry_run))
 
     # Notify the embed daemon (if running) that its on-disk store changed so
     # the next interactive UserPromptSubmit retrieval sees the new learnings
