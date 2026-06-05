@@ -439,13 +439,19 @@ def merge_parent_base(repo: Path, branch: str, int_refs):
 
 
 def _landed_range(branch: str, base, since_spec: dict):
-    """Range + window flags for mining a merged branch's own work.
-      - base given (merge first-parent): `base..branch`, no window — exact own-range.
-      - base None (ff/squash, no merge commit): range=branch + --since window, which also
-        picks up the author's trunk commits in the window (no structural way to isolate
-        'branch-own' post-ff without reflog); the short window bounds that bleed."""
+    """Range + window flags for mining a merged branch's own work, bounded so backfill
+    never reaches before the branch's processing boundary (the bug that mass-re-fired).
+
+      - commit-kind (the branch HAS an HWM): mine `hwm..branch` — only commits AFTER the
+        last processed one. Mining `base..branch` (merge fork) would reach back before the
+        HWM; an already-fully-processed branch (HWM==tip) yields EMPTY here -> no backfill.
+      - date-kind, base given (merge first-parent): `base..branch` + `--since` window —
+        exact own-range (no trunk bleed) AND date-bounded so an OLD merge isn't mined.
+      - date-kind, no base (ff/squash): `branch` + `--since` window (bleed bounded by it)."""
+    if since_spec.get("kind") == "commit":
+        return [f"{since_spec['sha']}..{branch}"], []
     if base:
-        return [f"{base}..{branch}"], []
+        return [f"{base}..{branch}"], _since_window_args(since_spec)
     return [branch], _since_window_args(since_spec)
 
 
@@ -487,16 +493,20 @@ def merged_ticketless_backfill(repo: Path, branch: str, author: str, since_spec:
     merged commits) and finalize has no ticket to resolve (capture never created one).
 
     Returns (commits, base) — `base` is the merge first-parent for an exact, bleed-free
-    own-range (None for ff/squash, where mining falls back to the windowed range) — when:
+    own-range (None for the HWM/ff cases, where _landed_range bounds differently) — when:
       - normal capture is empty for this branch (its work is integration-reachable = merged),
       - no KB ticket exists yet for the branch (any status),
-      - the author has own commits on the branch to mine.
-    Self-contained (re-checks capture-empty) so it's unit-testable in isolation."""
+      - the author has own commits to mine WITHIN the branch's window (HWM or --since).
+    Self-contained (re-checks capture-empty) so it's unit-testable in isolation.
+
+    A branch with an HWM is bounded by `hwm..branch` (commit-kind), so a fully-processed
+    branch (HWM==tip) yields no commits and is NOT backfilled — only genuinely new merged
+    work is. merge_parent_base is only meaningful for the date-kind (no-HWM) path."""
     if author_commits_for_branch(repo, branch, author, since_spec, int_refs):
         return None  # not merged — normal capture handles it
     if ticket_status_for_branch(vault, workspace, project, branch) is not None:
         return None  # already ticketed (any status) — not our gap
-    base = merge_parent_base(repo, branch, int_refs)
+    base = None if since_spec.get("kind") == "commit" else merge_parent_base(repo, branch, int_refs)
     commits = author_landed_commits(repo, branch, author, since_spec, base=base)
     if not commits:
         return None
@@ -1314,6 +1324,7 @@ def main():
     production_branches = cfg.get("production_branches", ["master", "main"])
     excluded_branches = set(default_candidates) | set(integration_branches)
     max_turns = cfg.get("max_turns", 30)
+    backfill_cap = cfg.get("backfill_cap", 5)  # max backfills per run (drains a backlog gradually, never floods)
 
     state = load_run_state()
     state = ensure_installed_marker(state)
@@ -1422,12 +1433,22 @@ def main():
             candidates.sort(reverse=True)
             exp_branches = manually_experimental_branches()
             seen = set()
+            bf_done = 0  # backfills processed this run (cap guard against a backlog flood)
             for ts, origin_norm, branch, repo, tipo, slug, folder_rel, commits, email, since_spec, base, backfill, mine_base in candidates:
                 key = (origin_norm, branch)
                 if key in seen:
                     print(f"  [dup-skip] {repo.relative_to(wpath)}:{branch} — already processed in fresher clone")
                     continue
                 seen.add(key)
+                # Cap backfills per run so a one-time backlog drains gradually (a few/night)
+                # instead of flooding (and exhausting the model budget). Deferred ones stay
+                # ticketless -> reconsidered next run. Normal captures are NOT capped.
+                if backfill:
+                    if bf_done >= backfill_cap:
+                        print(f"  [backfill-deferred] {repo.relative_to(wpath)}:{branch} — over cap "
+                              f"({backfill_cap}/run); will retry next run")
+                        continue
+                    bf_done += 1
                 if not args.include_resolved:
                     st = ticket_status_for_branch(vault, ws["name"], repo.name, branch)
                     if st in ("resolved", "experimental"):
