@@ -50,7 +50,8 @@ def test_fresh_install():
         post = _commands(s, "PostToolUse", matcher="Read")
         check("kb-bodyread under Read matcher", any("kb-bodyread-track.sh" in c for c in post))
         ss = _commands(s, "SessionStart")
-        check("session-branch + daemon-spawn present", sum("kb-session-branch.sh" in c or "kb-embed-daemon-spawn.sh" in c for c in ss) == 2)
+        check("daemon-spawn present (sole KB SessionStart hook)", any("kb-embed-daemon-spawn.sh" in c for c in ss))
+        check("session-branch NOT registered (manual-only marking)", not any("kb-session-branch.sh" in c for c in ss))
 
 
 def test_preserves_foreign_hooks():
@@ -97,7 +98,7 @@ def test_idempotent():
         check("second run no change", not r2["changed"] and not r2["wrote"])
         check("second run no backup", r2["backup"] is None)
         check("file byte-identical after re-run", p.read_text(encoding="utf-8") == before)
-        check("all entries skipped on re-run", len(r2["skipped"]) == 6 and len(r2["added"]) == 0)
+        check("all entries skipped on re-run", len(r2["skipped"]) == 5 and len(r2["added"]) == 0)
 
 
 def test_recognizes_localized_variant():
@@ -154,10 +155,10 @@ def test_atomic_no_partial_on_existing():
 
 
 def main():
-    # Smoke: the factory builds 6 entries across 3 events.
+    # Smoke: the factory builds 5 entries across 3 events.
     desired = kb_desired_hooks(CLAUDE_DIR)
     total = sum(len(v["entries"]) for v in desired.values())
-    check("factory yields 6 entries", total == 6)
+    check("factory yields 5 entries", total == 5)
 
     test_fresh_install()
     test_preserves_foreign_hooks()

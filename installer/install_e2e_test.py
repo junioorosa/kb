@@ -45,9 +45,9 @@ def test_fresh_host_install():
 
             check("claude_dir is the temp dir", rep["claude_dir"] == str(cdir))
 
-            # deploy: all 19 manifest files written into a fresh host
+            # deploy: all 18 manifest files written into a fresh host
             dep = rep["deploy"]
-            check("deploy wrote 19", dep.get("wrote") == 19)
+            check("deploy wrote 18", dep.get("wrote") == 18)
             check("engine kb.py in hooks/", (cdir / "hooks" / "kb.py").exists())
             check("kb_config.py in hooks/", (cdir / "hooks" / "kb_config.py").exists())
             check("kb-sync.py in scripts/", (cdir / "scripts" / "kb-sync.py").exists())
@@ -62,7 +62,7 @@ def test_fresh_host_install():
             check("settings has kb-context.sh", "kb-context.sh" in txt)
             check("settings has kb-bodyread under PostToolUse", "kb-bodyread-track.sh" in txt)
             st = rep["settings"]
-            check("settings reports 6 added", len(st.get("added", [])) == 6)
+            check("settings reports 5 added", len(st.get("added", [])) == 5)
 
             # version + source stamped (source lets the deployed `kb manage` find the clone)
             check(".kb-version stamped", (cdir / ".kb-version").exists())

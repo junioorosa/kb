@@ -171,7 +171,10 @@ def main() -> int:
             return 0
         data["session_id"] = session_id
         data["branch"] = branch
-        data["cwd"] = payload.get("cwd") or data.get("cwd") or ""
+        # Marking is manual-only: no SessionStart hook pre-populates the sidecar, so
+        # this intercept is the sole cwd source. Prefer the payload's cwd; fall back to
+        # the process cwd (the dir the host spawned the hook in) for hosts that omit it.
+        data["cwd"] = payload.get("cwd") or data.get("cwd") or os.getcwd()
         data["manual_done"] = True
         data["done_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         try:
@@ -189,7 +192,7 @@ def main() -> int:
             emit("kb-mark --experimental: no branch (session is not marked). "
                  "Use /kb-mark --experimental <branch>")
             return 0
-        cwd = payload.get("cwd") or data.get("cwd") or ""
+        cwd = payload.get("cwd") or data.get("cwd") or os.getcwd()
         data["session_id"] = session_id
         data["branch"] = branch
         data["cwd"] = cwd
@@ -221,7 +224,7 @@ def main() -> int:
 
     branch = branch_args[0]
     data = load_sidecar(path)
-    cwd = payload.get("cwd") or data.get("cwd") or ""
+    cwd = payload.get("cwd") or data.get("cwd") or os.getcwd()
     data["session_id"] = session_id
     data["branch"] = branch
     data["cwd"] = cwd

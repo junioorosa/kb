@@ -99,15 +99,10 @@ def kb_desired_hooks(claude_dir: Path) -> dict:
         "SessionStart": {
             "matcher": None,
             "entries": [
-                {
-                    "key": "kb-session-branch.sh",
-                    "hook": {
-                        "type": "command",
-                        "command": bash("kb-session-branch.sh"),
-                        "timeout": 5,
-                        "statusMessage": "KB: marking session branch...",
-                    },
-                },
+                # Branch marking is manual-only (`/kb-mark`, via the UserPromptSubmit
+                # intercept). There is deliberately NO SessionStart marking hook: the
+                # session<->branch sidecar is a file keyed by session_id that the sync
+                # reads directly, so a manual mark already survives a resume on its own.
                 {
                     "key": "kb-embed-daemon-spawn.sh",
                     "hook": {
