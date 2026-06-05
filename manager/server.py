@@ -40,6 +40,7 @@ sys.path.insert(0, str(REPO / "engine"))
 sys.path.insert(0, str(REPO / "installer"))
 
 import kb_config                                   # engine: config read/write
+import kb_vault                                    # engine: read-only vault reader
 import install                                     # installer: status orchestration
 import scheduler                                   # installer: per-OS schedule
 from settings_merge import merge_settings, SettingsMergeError  # installer: hook wiring
@@ -118,6 +119,28 @@ class Handler(BaseHTTPRequestHandler):
         st["daemon"] = daemon_ping()
         return st
 
+    # --- knowledge (read-only vault) ----------------------------------------
+    def _vault(self):
+        """Resolve the configured vault, or None if config is missing/unresolvable."""
+        try:
+            return Path(kb_config.resolve_vault(strict=True))
+        except Exception:
+            try:
+                v = kb_config.load_config().get("vault")
+                return Path(v) if v else None
+            except Exception:
+                return None
+
+    def _sync_history(self, limit: int = 50) -> list:
+        f = install.claude_dir() / "state" / "kb-sync-history.json"
+        if not f.exists():
+            return []
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            return data[-limit:][::-1] if isinstance(data, list) else []
+        except Exception:
+            return []
+
     def _integration(self, enable: bool) -> dict:
         cdir = install.claude_dir()
         killfile = cdir / "kb-hooks-disabled"
@@ -151,6 +174,34 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self._status())
         if path == "/api/config":
             return self._send(200, {"config": kb_config.load_config(), "path": str(kb_config.workspaces_path())})
+        if path == "/api/sync-history":
+            return self._send(200, {"runs": self._sync_history()})
+        if path.startswith("/api/knowledge/"):
+            return self._knowledge(path[len("/api/knowledge/"):])
+        return self._send(404, {"error": "not found"})
+
+    def _knowledge(self, sub: str):
+        vault = self._vault()
+        if vault is None or not vault.exists():
+            return self._send(400, {"error": "vault not configured or missing"})
+        qs = parse_qs(urlparse(self.path).query)
+        one = lambda k: (qs.get(k) or [None])[0]  # noqa: E731
+        try:
+            if sub == "overview":
+                return self._send(200, kb_vault.overview(vault))
+            if sub == "learnings":
+                return self._send(200, {"learnings": kb_vault.list_learnings(
+                    vault, project=one("project"), scope=one("scope"),
+                    tag=one("tag"), q=one("q"))})
+            if sub == "item":
+                rel = one("path")
+                if not rel:
+                    return self._send(400, {"error": "missing path"})
+                return self._send(200, kb_vault.read_item(vault, rel))
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        except Exception as e:
+            return self._send(500, {"error": f"{type(e).__name__}: {e}"})
         return self._send(404, {"error": "not found"})
 
     def do_PUT(self):
