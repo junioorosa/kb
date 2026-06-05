@@ -17,10 +17,5 @@ kb-workspaces.json
 # normally.
 tests/
 
-# Local-only "Core" explainer view in the manager (kept off GitHub per request).
-# Self-injecting drop-in: bootstrapped by one <script defer> line in index.html
-# that 404s harmlessly if the repo is ever pushed without these files present.
-manager/static/core.js
-manager/static/core.css
-# Local version snapshots of the gitignored Core view (checkpoints before edits).
+# Local version snapshots of the Core explainer view (manual checkpoints).
 manager/.core-backups/
