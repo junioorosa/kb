@@ -12,12 +12,10 @@ set -euo pipefail
 
 TIME="01:00"
 APPLY=""
-NO_MANAGER=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --apply) APPLY="--apply"; shift ;;
         --time)  TIME="$2"; shift 2 ;;
-        --no-manager) NO_MANAGER=1; shift ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -53,13 +51,9 @@ if [ -z "$APPLY" ]; then
     exit $code
 fi
 if [ "$code" -ne 0 ]; then
-    echo "Install reported errors; not launching the manager." >&2
+    echo "Install reported errors." >&2
     exit $code
 fi
-if [ -z "$NO_MANAGER" ]; then
-    echo ""
-    echo "Opening the KB manager in your browser..."
-    echo "(This terminal runs the manager. Ctrl+C when done.)"
-    "$PY" "$(dirname "$HERE")/manager/server.py"
-fi
+echo ""
+echo "Done. Search your apps (Spotlight / app launcher) for 'KB Manager' to open the config UI."
 exit $code

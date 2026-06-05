@@ -11,8 +11,7 @@
 #Requires -Version 5.1
 param(
     [switch]$Apply,
-    [string]$Time = "01:00",
-    [switch]$NoManager
+    [string]$Time = "01:00"
 )
 $ErrorActionPreference = "Stop"
 
@@ -72,15 +71,10 @@ if (-not $Apply) {
 }
 
 if ($code -ne 0) {
-    Write-Host "Install reported errors; not launching the manager." -ForegroundColor Yellow
+    Write-Host "Install reported errors." -ForegroundColor Yellow
     exit $code
 }
 
-if (-not $NoManager) {
-    $server = Join-Path (Split-Path -Parent $InstallerDir) "manager\server.py"
-    Write-Host ""
-    Write-Host "Opening the KB manager in your browser..." -ForegroundColor Cyan
-    Write-Host "(This window runs the manager. Close it or press Ctrl+C when done.)"
-    & $PyExe @($PyArgs + @($server))
-}
+Write-Host ""
+Write-Host "Done. Press the Windows key and type 'KB Manager' to open the config UI." -ForegroundColor Green
 exit $code

@@ -32,6 +32,7 @@ sys.path.insert(0, str(HERE))
 
 import deploy            # noqa: E402
 import scheduler         # noqa: E402
+import shortcut          # noqa: E402
 from settings_merge import merge_settings, SettingsMergeError  # noqa: E402
 
 
@@ -71,6 +72,12 @@ def step_scheduler(cdir: Path, apply: bool, time_hhmm: str) -> dict:
     return scheduler.register(cdir, time_hhmm=time_hhmm, dry_run=not apply)
 
 
+def step_shortcut(apply: bool) -> dict:
+    """Create the clickable 'KB Manager' shortcut so teammates open the config UI
+    without a terminal. The manager runs from the repo, so the shortcut targets it."""
+    return shortcut.create_shortcut(REPO_ROOT, dry_run=not apply)
+
+
 def step_version(cdir: Path, apply: bool) -> dict:
     rep = {"from": installed_version(cdir), "to": repo_version()}
     if apply:
@@ -103,13 +110,18 @@ def step_config(cdir: Path) -> dict:
 
 # --- Orchestration -----------------------------------------------------------
 
-def run(apply: bool, time_hhmm: str, scheduler_apply: bool | None = None) -> dict:
+def run(apply: bool, time_hhmm: str, scheduler_apply: bool | None = None,
+        shortcut_apply: bool | None = None) -> dict:
     cdir = claude_dir()
     # The scheduler keys off a global task name, not claude_dir; `scheduler_apply`
     # lets a caller install everything else while leaving the schedule untouched
     # (also how the E2E test avoids clobbering a real ClaudeKbSync from a temp dir).
     if scheduler_apply is None:
         scheduler_apply = apply
+    # The shortcut writes to the real user Desktop (not claude_dir); `shortcut_apply`
+    # lets the E2E test exercise everything else without littering the live Desktop.
+    if shortcut_apply is None:
+        shortcut_apply = apply
     report = {
         "mode": "apply" if apply else "dry-run",
         "repo": str(REPO_ROOT),
@@ -118,6 +130,7 @@ def run(apply: bool, time_hhmm: str, scheduler_apply: bool | None = None) -> dic
         "deploy": step_deploy(cdir, apply),
         "settings": step_settings(cdir, apply),
         "scheduler": step_scheduler(cdir, scheduler_apply, time_hhmm),
+        "shortcut": step_shortcut(shortcut_apply),
         "config": step_config(cdir),
     }
     if apply:
@@ -156,6 +169,11 @@ def _summary(rep: dict) -> str:
     sc = rep["scheduler"]
     lines.append(f"  scheduler: {sc.get('os')} task '{sc.get('task', 'kb-sync')}' "
                  + ("registered" if sc.get("registered") else f"@ {sc.get('time')} (dry-run)"))
+    sh = rep.get("shortcut", {})
+    if sh:
+        state = ("created" if sh.get("created") else
+                 ("would create" if sh.get("dry_run") else f"ERROR {sh.get('error', 'failed')}"))
+        lines.append(f"  shortcut : {sh.get('os')} {state} -> {sh.get('path')}")
     c = rep["config"]
     lines.append(f"  config   : " + ("present, vault=" + str(c.get("vault")) if c.get("present")
                                       else "MISSING — " + c.get("note", "")))
@@ -171,6 +189,7 @@ if __name__ == "__main__":
     ap.add_argument("--status", action="store_true", help="show installed state")
     ap.add_argument("--time", default=scheduler.DEFAULT_TIME, help="daily kb-sync time HH:MM (default 01:00)")
     ap.add_argument("--skip-scheduler", action="store_true", help="install everything but don't touch the OS scheduler")
+    ap.add_argument("--skip-shortcut", action="store_true", help="install everything but don't create the desktop shortcut")
     ap.add_argument("--json", action="store_true", help="emit raw JSON report")
     args = ap.parse_args()
 
@@ -182,7 +201,8 @@ if __name__ == "__main__":
         print(json.dumps(out, indent=2))
     else:
         sched = False if args.skip_scheduler else None
-        out = run(apply=args.apply, time_hhmm=args.time, scheduler_apply=sched)
+        shortc = False if args.skip_shortcut else None
+        out = run(apply=args.apply, time_hhmm=args.time, scheduler_apply=sched, shortcut_apply=shortc)
         if args.json:
             print(json.dumps(out, indent=2))
         else:
