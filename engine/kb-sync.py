@@ -1148,12 +1148,36 @@ pr:
 4. Audit current learnings against the diff. For each one classify:
    - CONFIRMS — diff matches the learning, keep.
    - REFUTES — diff contradicts; correct the file, add `## Correction history` line.
-   - ADJUSTS — partially right; edit to incorporate nuance.
-   - ADDS — diff/commits reveal new pattern; create new learning file. Classify scope:
+   - ADJUSTS — partially right; edit to incorporate nuance. You MAY trim an over-long
+     existing learning toward its delta (drop tutorial scaffolding), but never delete a file.
+   - ADDS — diff/commits reveal a pattern that PASSES the worth-saving test below;
+     create a new learning file. Classify scope:
      - ticket: `{vault}/{folder}/Learnings/<name>.md`
      - project: `{vault}/{workspace}/{repo.name}/Learnings/<name>.md`
      - workspace: `{vault}/{workspace}/Learnings/<name>.md`
    Default conservative: ticket.
+
+   **Worth-saving test — the bar for ADDS (when in doubt, SKIP):**
+   A learning earns its place ONLY if it carries what a strong model + the visible
+   code/diff CANNOT regenerate. Ask "where else could this come from?":
+   - Nowhere but a human decision/fact — a magic constant's meaning (`202`=DEVOLUCAO),
+     a rule confirmed with a person/PR ("confirmado com a área fiscal…"; "Específico da
+     Amazon — PR #1084"), a deliberate trade-off + its rationale → SAVE (highest value).
+   - From the code but cross-file / hidden — existence + contract of a project util/hook
+     (a Tuple-to-POJO mapper util, a canonical post-emission hook method), a naming
+     convention (a `*Ativos` DAO suffix), a stack-specific silent-fail gotcha (Jackson
+     reads `ativo` not `isAtivo`) → SAVE.
+   - Only from the model's general knowledge — a framework how-to it already emits
+     (Chart.js dual axis, CSS `min-width:0`, "extract a value object"), a generic best
+     practice → DO NOT SAVE (noise; it dilutes retrieval).
+   - EXCEPTION: a generic technique the team deliberately standardizes AGAINST the
+     model's default (a house convention enforced in review) → a SHORT note capturing
+     the DECISION, not the tutorial.
+
+   **Write the delta, not a tutorial.** Lead with the surprising part — the fact/gotcha/
+   decision the model wouldn't already say. Strip what a competent dev already knows (what
+   the framework is, standard API usage). If nothing non-regenerable survives the strip,
+   SKIP rather than create the file.
 5. Update `{vault}/{folder}/_index.md` apparent_problem / tags / related_tickets based on commits + diff. **Always set `last_update: <YYYY-MM-DD today>`**. Keep `branch: {branch}` intact — it is the match key. Do NOT set status=resolved here — only the finalize routine does that. Use English frontmatter keys: project, type, module, slug, title, opened, resolved, last_update, apparent_problem, actual_solution, related_tickets, branch, pr. Status enum: open|in-progress|resolved|discarded. Scope enum: ticket|project|workspace.
 6. Report briefly: created/updated file paths, CONFIRMS/REFUTES/ADJUSTS/ADDS counts and names.
 
