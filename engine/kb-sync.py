@@ -3,8 +3,9 @@
 
 Scans workspaces from ~/.claude/kb-workspaces.json for git repos, dedupes by
 remote.origin.url, then for each canonical repo:
-  - Fetches (best-effort, --prune) so integration refs are current and deleted
-    remote branches are pruned.
+  - Refreshes ONLY the integration/production refs it needs, by exact refspec
+    (read-only on the remote; no all-heads wildcard, no --prune, nothing deleted
+    locally). Best-effort: offline -> proceed on stale refs.
   - For each free-form work branch (the branch name is the match key; an
     optional "<type>/" prefix groups the KB folder), captures author commits
     and asks Claude to create/update the KB entry.
@@ -244,7 +245,15 @@ def effective_since(state: dict, origin_norm: str, branch: str, repo: Path) -> d
         r = run_git(["merge-base", "--is-ancestor", hwm, branch], repo)
         if r.returncode == 0:
             return {"kind": "commit", "sha": hwm, "source": "hwm"}
-        print(f"    [warn] HWM {hwm[:10]} not ancestor of {branch} (rebase/force-push?), bootstrap fallback")
+        print(f"    [warn] HWM {hwm[:10]} not ancestor of {branch} (rebase/force-push?), date fallback")
+
+    # No per-branch SHA-HWM: the floor is this REPO's last_examined_at date (the date
+    # HWM — branch-independent). It only advances on a clean, error-free, fetch-OK run,
+    # so it's a safe floor: every commit before it was already seen. cap-7d/installed is
+    # only the absolute first-run bootstrap, before any date has been recorded.
+    last_exam = state.get("last_examined_at", {}).get(origin_norm)
+    if last_exam:
+        return {"kind": "date", "iso": last_exam, "source": "last-examined"}
 
     bootstrap_date = max(installed, cap_date)
     source = "cap-7d-truncated" if cap_date > installed else "bootstrap"
@@ -259,6 +268,21 @@ def bump_hwm(state: dict, origin_norm: str, branch: str, repo: Path) -> bool:
         return False
     state.setdefault("last_processed_commit", {}).setdefault(origin_norm, {})[branch] = head_sha
     return True
+
+
+def advance_examined_dates(state: dict, fetched_ok: set, incomplete: set, today: str) -> set:
+    """Advance the date HWM: set last_examined_at[origin]=today for origins fetched
+    cleanly AND examined with zero errors/deferrals this run (fetched_ok MINUS
+    incomplete). Returns the sealed set; held-back origins keep their old date so
+    their branches are re-examined next run. This is the error-gate that stops
+    uncaptured work (error / cap-deferral / stale fetch) from being sealed behind
+    the date skip."""
+    sealed = set(fetched_ok) - set(incomplete)
+    if sealed:
+        le = state.setdefault("last_examined_at", {})
+        for o in sealed:
+            le[o] = today
+    return sealed
 
 
 def load_config():
@@ -277,9 +301,12 @@ def load_config():
 
 
 def run_git(args, cwd, check=False, timeout=30):
+    # GIT_TERMINAL_PROMPT=0: a headless sync must never block on a credential
+    # prompt — fail fast instead of hanging to the timeout.
     r = subprocess.run(
         ["git", *args], cwd=cwd, capture_output=True,
         text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
     if check and r.returncode != 0:
         raise RuntimeError(f"git {args} failed in {cwd}: {r.stderr}")
@@ -383,15 +410,74 @@ def list_candidate_branches(repo: Path, excluded: set):
     return out
 
 
-def fetch_repo(repo: Path):
-    """Best-effort `git fetch --prune` so integration refs are current and deleted
-    remote branches are pruned (branch-gone detection). Network/credential failures
-    are non-fatal (offline -> stale local refs)."""
-    try:
-        r = run_git(["fetch", "--prune", "--no-tags", "origin"], repo, timeout=180)
-        return r.returncode == 0
-    except Exception:
-        return False
+def fetch_repo(repo: Path, branch_names):
+    """Read-only refresh of ONLY the integration/production refs the sync needs.
+
+    Non-destructive, by design and verifiably:
+      * `git fetch` never writes the remote and never touches `refs/heads/*` or the
+        working tree — it only reads the remote and updates the local mirror under
+        `refs/remotes/origin/*`. Your branches, commits and uncommitted work are
+        untouched.
+      * We fetch each needed branch by its EXACT refspec
+        (`+refs/heads/<b>:refs/remotes/origin/<b>`), one at a time — never a `*`
+        pattern. A remote with branches differing only in case (e.g. `Feat/x` and
+        `feat/x`) makes a wildcard `fetch --prune` of all heads fail on a
+        case-insensitive filesystem; an exact ref name cannot collide with itself.
+      * No `--prune`: nothing is deleted locally (the old all-heads prune was what
+        churned/deleted mirror refs).
+
+    Returns (ok, reason): ok=True if at least one requested ref fetched cleanly;
+    reason carries the last git error when nothing fetched (offline / unreachable).
+    A branch the repo's remote doesn't have ("couldn't find remote ref") is expected
+    and never counts as a failure on its own.
+    """
+    any_ok, last_err = False, ""
+    for b in branch_names:
+        refspec = f"+refs/heads/{b}:refs/remotes/origin/{b}"
+        try:
+            r = run_git(["fetch", "--no-tags", "origin", refspec], repo, timeout=120)
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            continue
+        if r.returncode == 0:
+            any_ok = True
+        elif "couldn't find remote ref" not in (r.stderr or "").lower():
+            err = (r.stderr or "").strip().splitlines()
+            last_err = err[-1] if err else f"rc={r.returncode}"
+    return any_ok, last_err
+
+
+def branch_unchanged_since_hwm(state: dict, origin_norm: str, branch: str, repo: Path) -> bool:
+    """True iff this branch's tip equals the stored per-branch SHA high-water mark —
+    i.e. it has ZERO new commits since the last successful capture. Exact (sha
+    equality), not a date horizon: a branch with an old-but-never-captured commit has
+    tip != HWM and is still walked."""
+    hwm = state.get("last_processed_commit", {}).get(origin_norm, {}).get(branch)
+    if not hwm:
+        return False  # never captured -> defer to the date floor / walk
+    tip = run_git(["rev-parse", branch], repo).stdout.strip()
+    return bool(tip) and tip == hwm
+
+
+def branch_skippable(state: dict, origin_norm: str, branch: str, repo: Path) -> bool:
+    """Nothing new to examine on this branch, by either safe signal:
+
+      * tip == per-branch SHA-HWM (exact: this tip was already captured), or
+      * tip's commit date < the repo's `last_examined_at` (the date HWM): every
+        commit on the branch predates the last full, error-free examination of this
+        repo, so it was already seen.
+
+    Both are safe against the sync-was-down case because `last_examined_at` only
+    advances on a clean, fetch-OK, error-free run — a never-examined backlog (e.g. a
+    repo whose fetch was failing) has no date recorded for it and is fully walked."""
+    if branch_unchanged_since_hwm(state, origin_norm, branch, repo):
+        return True
+    last_exam = state.get("last_examined_at", {}).get(origin_norm)
+    if last_exam:
+        tip_date = run_git(["log", "-1", "--format=%cs", branch], repo).stdout.strip()
+        if tip_date and tip_date < last_exam:
+            return True
+    return False
 
 
 def resolve_default_branch(repo: Path, candidates):
@@ -1108,8 +1194,9 @@ class RunReport:
         self.repos_discovered = 0
         self.repos_fetched = 0
 
-    def add_fetch_failure(self, workspace: str, repo_rel: str, origin: str):
-        self.fetch_failures.append({"workspace": workspace, "repo_rel": repo_rel, "origin": origin})
+    def add_fetch_failure(self, workspace: str, repo_rel: str, origin: str, reason: str = ""):
+        self.fetch_failures.append({"workspace": workspace, "repo_rel": repo_rel,
+                                    "origin": origin, "reason": reason})
 
     def note_scan(self, discovered: int, fetched: int):
         """Accumulate repo scan/fetch counts across workspaces (sync-health scope)."""
@@ -1401,12 +1488,24 @@ def main():
     excluded_branches = set(default_candidates) | set(integration_branches)
     max_turns = cfg.get("max_turns", 30)
     backfill_cap = cfg.get("backfill_cap", 5)  # max backfills per run (drains a backlog gradually, never floods)
+    capture_cap = cfg.get("capture_cap", 25)   # max normal captures per run — a recovered
+    #                                             multi-day outage opens wide windows on many
+    #                                             branches; cap so it drains over nights instead
+    #                                             of mass-firing (and exhausting the model budget).
 
     state = load_run_state()
     state = ensure_installed_marker(state)
     save_run_state(state)
 
     captures, finalizes, errors = 0, 0, 0
+    # Per-origin gate for advancing last_examined_at (the date HWM). An origin's date
+    # only advances when it was fetched cleanly AND fully examined with zero errors /
+    # zero cap-deferrals this run — so a branch left uncaptured (error, outage, cap) is
+    # never sealed behind the date skip and is re-examined next run.
+    fetched_ok_origins, incomplete_origins = set(), set()
+    # A run scoped by any of these flags is partial -> it must NOT advance the date.
+    partial_run = bool(args.repo or args.branch or args.since_hours is not None
+                       or args.ignore_hwm or args.skip_capture or args.skip_finalize)
     report = RunReport()
 
     for ws in cfg["workspaces"]:
@@ -1420,20 +1519,29 @@ def main():
 
         repos = discover_repos(wpath)
         print(f"  discovered={len(repos)} repos")
+        # Refresh ONLY the refs the sync needs: integration (capture's `--not`) plus
+        # production (finalize's merge target), by exact refspec. Read-only on the
+        # remote; no all-heads wildcard, no --prune.
+        fetch_names = list(dict.fromkeys([*integration_branches, *production_branches]))
         ok_count, fetch_failed = 0, []
         for r in repos:
-            if fetch_repo(r):
+            if not repo_origin(r):
+                continue  # local-only repo: nothing to fetch, no staleness risk
+            ok, reason = fetch_repo(r, fetch_names)
+            o = normalize_origin(repo_origin(r)) or str(r)
+            if ok:
                 ok_count += 1
-            elif repo_origin(r):
-                # has a remote but fetch failed -> origin/* refs are stale, real risk.
-                # repos with no remote are skipped (local is authoritative, no staleness).
-                fetch_failed.append(r)
-        print(f"  fetched (prune) {ok_count}/{len(repos)} repos")
+                fetched_ok_origins.add(o)
+            else:
+                # has a remote but no integration ref fetched -> origin/* may be stale.
+                fetch_failed.append((r, reason))
+                incomplete_origins.add(o)  # stale refs -> examination not trustworthy
+        print(f"  fetched {ok_count} repos (integration refs, read-only)")
         report.note_scan(len(repos), ok_count)
-        for r in fetch_failed:
+        for r, reason in fetch_failed:
             rel = r.relative_to(wpath)
-            print(f"    [warn] fetch FAILED (origin unreachable): {rel} — capture/finalize using STALE refs")
-            report.add_fetch_failure(ws["name"], str(rel), repo_origin(r) or "")
+            print(f"    [warn] fetch FAILED ({reason or 'origin unreachable'}): {rel} — capture/finalize using STALE refs")
+            report.add_fetch_failure(ws["name"], str(rel), repo_origin(r) or "", reason)
 
         # Embedding-backed retrieval store: reindex vault (and transcripts of
         # open branches) so capture/finalize can inject top-K snippets inline
@@ -1473,6 +1581,13 @@ def main():
                 for branch in list_candidate_branches(r, excluded_branches):
                     if args.branch and branch != args.branch:
                         continue
+                    # Cheap skip: nothing new since this repo was last examined
+                    # (tip == SHA-HWM, or tip's commit date < the repo's date HWM).
+                    # Collapses the full local-branch walk to the few that moved.
+                    # Skipped only on the normal path (overrides force a re-walk).
+                    if (args.since_hours is None and not args.ignore_hwm
+                            and branch_skippable(state, origin_norm, branch, r)):
+                        continue
                     tipo, slug, folder_rel = parse_branch(branch)
                     if args.since_hours is not None:
                         since_spec = {"kind": "date", "hours": args.since_hours, "source": "cli-override"}
@@ -1510,7 +1625,7 @@ def main():
             candidates.sort(reverse=True)
             exp_branches = manually_experimental_branches()
             seen = set()
-            bf_done = 0  # backfills processed this run (cap guard against a backlog flood)
+            bf_done, cap_done = 0, 0  # backfills / normal captures executed this run (cap guards)
             for ts, origin_norm, branch, repo, tipo, slug, folder_rel, commits, email, since_spec, base, backfill, mine_base in candidates:
                 key = (origin_norm, branch)
                 if key in seen:
@@ -1518,12 +1633,13 @@ def main():
                     continue
                 seen.add(key)
                 # Cap backfills per run so a one-time backlog drains gradually (a few/night)
-                # instead of flooding (and exhausting the model budget). Deferred ones stay
-                # ticketless -> reconsidered next run. Normal captures are NOT capped.
+                # instead of flooding (and exhausting the model budget). A deferred item
+                # leaves its origin incomplete so the date HWM won't seal past it.
                 if backfill:
                     if bf_done >= backfill_cap:
                         print(f"  [backfill-deferred] {repo.relative_to(wpath)}:{branch} — over cap "
                               f"({backfill_cap}/run); will retry next run")
+                        incomplete_origins.add(origin_norm)
                         continue
                     bf_done += 1
                 if not args.include_resolved:
@@ -1546,6 +1662,16 @@ def main():
                 if not base:
                     print(f"  [skip] {repo.relative_to(wpath)}:{branch} — no integration base / default branch")
                     continue
+                # Cap normal captures too: a recovered multi-day outage opens wide
+                # windows on many branches; drain over nights rather than mass-fire.
+                # Deferred -> origin incomplete so the date HWM won't seal past it.
+                if not backfill:
+                    if cap_done >= capture_cap:
+                        print(f"  [capture-deferred] {repo.relative_to(wpath)}:{branch} — over cap "
+                              f"({capture_cap}/run); will retry next run")
+                        incomplete_origins.add(origin_norm)
+                        continue
+                    cap_done += 1
                 # Backfill mines commit-anchored (range=branch) because the branch is
                 # already merged — a ref-anchored base...branch diff would be empty.
                 src_label = "backfill-merged" if backfill else since_spec["source"]
@@ -1573,6 +1699,7 @@ def main():
                                    slug, slug, len(commits), hints, bumped, rc, out, err, src_label)
                 if rc != 0:
                     errors += 1
+                    incomplete_origins.add(origin_norm)  # uncaptured -> don't seal the date
                     print(f"    claude rc={rc}")
                     if err.strip():
                         print(f"    stderr: {err.strip()[:500]}")
@@ -1672,12 +1799,25 @@ def main():
                         clear_manual_done(tbranch)
                     if rc != 0:
                         errors += 1
+                        incomplete_origins.add(origin_norm)  # unfinalized -> don't seal the date
                         print(f"    claude rc={rc}")
                     if out.strip():
                         for line in out.splitlines()[:40]:
                             print(f"    {line}")
 
     print(f"\n=== done. captures={captures} finalizes={finalizes} errors={errors} dry_run={args.dry_run} ===")
+
+    # Advance the date HWM (last_examined_at) for origins examined cleanly THIS run:
+    # fetched OK and with zero capture/finalize errors and zero cap-deferrals. Skipped
+    # entirely on a partial run (any scoping flag) or a dry run. Next run's date skip +
+    # window floor then move forward only for repos we fully and successfully examined.
+    if not args.dry_run and not partial_run:
+        today = datetime.now().strftime("%Y-%m-%d")
+        sealed = advance_examined_dates(state, fetched_ok_origins, incomplete_origins, today)
+        if sealed:
+            save_run_state(state)
+            print(f"  last_examined_at -> {today} for {len(sealed)} origin(s); "
+                  f"{len(incomplete_origins)} held back (errors/deferrals/stale fetch)")
 
     # Record this run for the manager's sync-history view (real runs only).
     if not args.dry_run:
