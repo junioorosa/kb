@@ -42,6 +42,10 @@ body {
 .brand-name { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
 .brand-sub { color: var(--text-faint); font-size: 13px; font-weight: 500; }
 
+/* Generic hide utility. Beats element rules like `.pill`/`.btn` that set their
+   own display (the scoped `.view.hidden` below predates this and still applies). */
+.hidden { display: none !important; }
+
 .pills { display: flex; gap: 8px; flex-wrap: wrap; }
 .pill {
   font-size: 12.5px; font-weight: 600; padding: 5px 12px;
@@ -94,6 +98,9 @@ input::placeholder { color: var(--text-faint); }
 
 /* Buttons */
 .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* Actions row that sits under the status list (Status card): give it a tidy
+   separator so the buttons read as their own zone, not crammed against the list. */
+.kv + .row { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
 .btn {
   font-family: var(--font); font-size: 13.5px; font-weight: 600;
   padding: 9px 16px; border-radius: var(--radius-sm); cursor: pointer;

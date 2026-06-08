@@ -176,6 +176,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"config": kb_config.load_config(), "path": str(kb_config.workspaces_path())})
         if path == "/api/sync-history":
             return self._send(200, {"runs": self._sync_history()})
+        if path == "/api/update-check":
+            # Read-only remote probe (git fetch). Split off /api/status so a slow or
+            # offline network never blocks the page load; install.update_check is
+            # fail-soft and always returns a reason instead of raising.
+            return self._send(200, install.update_check())
         if path.startswith("/api/knowledge/"):
             return self._knowledge(path[len("/api/knowledge/"):])
         return self._send(404, {"error": "not found"})
@@ -239,6 +244,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, scheduler.register(install.claude_dir(), time_hhmm=t, dry_run=False))
         if path == "/api/integration":
             return self._send(200, self._integration(bool(body.get("enable", True))))
+        if path == "/api/update":
+            # Fast-forward the source tree to the remote + re-deploy (delegates to the
+            # installer; the manager never deploys files itself). Refuses a dirty or
+            # diverged tree and is reversible via the deploy backup.
+            return self._send(200, install.update_apply())
         return self._send(404, {"error": "not found"})
 
 

@@ -15,6 +15,7 @@
       </div>
       <div id="pills" class="pills">
         <span class="pill pill-muted" id="pill-version">v—</span>
+        <span class="pill pill-warn hidden" id="pill-update">update ready</span>
         <span class="pill pill-muted" id="pill-daemon">Embedding —</span>
         <span class="pill pill-muted" id="pill-sched">sync —</span>
       </div>
@@ -33,10 +34,16 @@
         <p class="card-sub">What's installed and running on this machine.</p>
         <dl class="kv" id="status-kv">
           <div><dt>Version</dt><dd id="st-version">—</dd></div>
+          <div><dt>Updates</dt><dd id="st-update">—</dd></div>
           <div><dt>Vault</dt><dd id="st-vault">—</dd></div>
           <div><dt>Embedding</dt><dd id="st-daemon">—</dd></div>
           <div><dt>Scheduler</dt><dd id="st-sched">—</dd></div>
         </dl>
+        <div class="row">
+          <button class="btn btn-ghost" id="check-update">Check for updates</button>
+          <button class="btn btn-primary hidden" id="apply-update">Update now</button>
+          <span class="inline-msg" id="update-msg"></span>
+        </div>
       </section>
 
       <!-- Vault -->

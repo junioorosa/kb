@@ -80,6 +80,61 @@ async function loadStatus() {
   pill("pill-sched", "sync " + (exists ? "✓" : "✗"), exists ? "pill-ok" : "pill-warn");
 }
 
+// --- Updates (remote-aware, deliberate) -----------------------------------
+// Detect a newer KB on the remote (read-only VERSION compare) and offer a
+// one-click pull + re-deploy. The apply is fast-forward-only + reversible
+// (server side); here we only render state and trigger it on an explicit click.
+function renderUpdate(u) {
+  const el = $("st-update"), pill = $("pill-update"), applyBtn = $("apply-update");
+  el.title = (u && u.reason) ? u.reason : "";
+  if (!u || (!u.checked && u.reason)) {
+    el.innerHTML = dot("warn") + "couldn't check";   // offline / no remote VERSION
+    pill.classList.add("hidden");
+    applyBtn.classList.add("hidden");
+    return;
+  }
+  if (u.update_available) {
+    el.innerHTML = dot("warn") + `update available: v${esc(u.local_version)} → v${esc(u.remote_version)}`;
+    pill.textContent = `update v${esc(u.remote_version)}`;
+    pill.classList.remove("hidden");
+    applyBtn.classList.remove("hidden");
+  } else {
+    el.innerHTML = dot("ok") + `up to date (v${esc(u.local_version)})`;
+    pill.classList.add("hidden");
+    applyBtn.classList.add("hidden");
+  }
+}
+
+async function checkUpdate(opts = {}) {
+  if (opts.manual) setMsg("update-msg", "checking…", "");
+  let u;
+  try { u = await api("GET", "/api/update-check"); }
+  catch (e) { renderUpdate({ reason: e.message, checked: false }); if (opts.manual) setMsg("update-msg", e.message, "err"); return; }
+  renderUpdate(u);
+  if (opts.manual) {
+    const txt = u.checked ? (u.update_available ? "update available" : "up to date") : (u.reason || "couldn't check");
+    setMsg("update-msg", txt, u.checked ? "ok" : "err");
+  }
+}
+
+async function applyUpdate() {
+  if (!confirm("Pull the latest version and re-deploy?\n\n" +
+    "Fast-forwards the source tree and re-installs the hooks/engine. Reversible — " +
+    "every overwritten file is backed up. Refuses if you have uncommitted or diverging local changes.")) return;
+  const btn = $("apply-update");
+  btn.disabled = true;
+  setMsg("update-msg", "updating…", "");
+  let r;
+  try { r = await api("POST", "/api/update"); }
+  catch (e) { setMsg("update-msg", e.message, "err"); btn.disabled = false; return; }
+  btn.disabled = false;
+  if (!r.updated) { setMsg("update-msg", r.reason || "update did not apply", "err"); return; }
+  setMsg("update-msg", `updated v${esc(r.from)} → v${esc(r.to)}. ${esc(r.note || "")}`, "ok");
+  toast(`Updated to v${r.to} — restart the manager to load UI changes`, "ok");
+  loadStatus();
+  checkUpdate();
+}
+
 // --- Config (vault + workspaces) ------------------------------------------
 let WORKSPACES = [];
 
@@ -317,6 +372,8 @@ function init() {
   $("save-ws").addEventListener("click", saveWorkspaces);
   $("save-sched").addEventListener("click", saveSchedule);
   $("integ-toggle").addEventListener("change", toggleIntegration);
+  $("check-update").addEventListener("click", () => checkUpdate({ manual: true }));
+  $("apply-update").addEventListener("click", applyUpdate);
 
   document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => switchView(t.dataset.view)));
   $("kn-project").addEventListener("change", (e) => { KN.project = e.target.value; loadLearnings(); });
@@ -330,6 +387,7 @@ function init() {
   loadStatus();
   loadConfig();
   loadIntegration();
+  checkUpdate();             // fail-soft remote probe; never blocks the page render
   switchView("knowledge");  // knowledge is the default landing view
 }
 
