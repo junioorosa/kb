@@ -144,10 +144,84 @@ def test_branch_unchanged_since_hwm():
               kb.branch_unchanged_since_hwm(state, ORIGIN_NORM, "feat/x", repo) is False and old != c1)
 
 
+def test_date_floor_skip():
+    print("test_date_floor_skip")
+    with tempfile.TemporaryDirectory() as d:
+        repo = init_repo(Path(d) / "repo")
+        commit(repo, "a.txt", "base\n", "init")
+        git(repo, "checkout", "-q", "-b", "feat/x")
+        commit(repo, "x.txt", "old\n", "old work", date="2026-05-01T10:00:00")
+
+        # No SHA-HWM, no date floor -> walk (must examine).
+        check("no HWM + no date -> walk",
+              kb.branch_skippable({}, ORIGIN_NORM, "feat/x", repo) is False)
+        # last_examined_at AFTER the tip's date -> already seen -> skip.
+        st = {"last_examined_at": {ORIGIN_NORM: "2026-05-10"}}
+        check("tip date < last_examined -> skip", kb.branch_skippable(st, ORIGIN_NORM, "feat/x", repo) is True)
+        # last_examined_at BEFORE the tip's date -> new since last exam -> walk.
+        st = {"last_examined_at": {ORIGIN_NORM: "2026-04-25"}}
+        check("tip date >= last_examined -> walk", kb.branch_skippable(st, ORIGIN_NORM, "feat/x", repo) is False)
+        # SHA-HWM exact match still skips even with no date floor.
+        tip = git(repo, "rev-parse", "feat/x").stdout.strip()
+        st = {"last_processed_commit": {ORIGIN_NORM: {"feat/x": tip}}}
+        check("tip == SHA-HWM -> skip (exact)", kb.branch_skippable(st, ORIGIN_NORM, "feat/x", repo) is True)
+
+
+def test_effective_since_floor():
+    print("test_effective_since_floor")
+    with tempfile.TemporaryDirectory() as d:
+        repo = init_repo(Path(d) / "repo")
+        commit(repo, "a.txt", "base\n", "init")
+        git(repo, "checkout", "-q", "-b", "feat/x")
+        c1 = commit(repo, "x.txt", "one\n", "step1")
+
+        # No SHA-HWM but a date recorded -> window floor IS last_examined_at.
+        st = {"last_examined_at": {ORIGIN_NORM: "2026-05-10"}}
+        s = kb.effective_since(st, ORIGIN_NORM, "feat/x", repo)
+        check("floor uses last_examined_at (not cap-7d)",
+              s["kind"] == "date" and s["iso"] == "2026-05-10" and s["source"] == "last-examined")
+
+        # SHA-HWM present (ancestor) -> commit window, precedence over the date.
+        st = {"last_processed_commit": {ORIGIN_NORM: {"feat/x": c1}},
+              "last_examined_at": {ORIGIN_NORM: "2026-05-10"}}
+        s = kb.effective_since(st, ORIGIN_NORM, "feat/x", repo)
+        check("SHA-HWM precedence (commit window)", s["kind"] == "commit" and s["sha"] == c1)
+
+        # Neither -> first-run bootstrap date.
+        s = kb.effective_since({"installed_at": "2026-05-01"}, ORIGIN_NORM, "feat/x", repo)
+        check("no date -> bootstrap", s["kind"] == "date" and s["source"] in ("bootstrap", "cap-7d-truncated"))
+
+
+def test_two_run_and_error_gate():
+    print("test_two_run_and_error_gate")
+    # The advance gate: only (fetched_ok - incomplete) origins seal the date.
+    state = {}
+    sealed = kb.advance_examined_dates(state, {"A", "B"}, {"B"}, "2026-06-08")
+    check("clean origin A sealed", sealed == {"A"})
+    check("A date recorded", state["last_examined_at"]["A"] == "2026-06-08")
+    check("errored origin B held back (no date)", "B" not in state.get("last_examined_at", {}))
+
+    # Consequence on a real old-tip branch: run2 after the seal.
+    with tempfile.TemporaryDirectory() as d:
+        repo = init_repo(Path(d) / "repo")
+        commit(repo, "a.txt", "base\n", "init")
+        git(repo, "checkout", "-q", "-b", "feat/x")
+        commit(repo, "x.txt", "old\n", "old", date="2026-05-01T10:00:00")
+        # Sealed origin A: its unchanged old branch is now skipped.
+        check("sealed origin -> old branch skipped next run",
+              kb.branch_skippable(state, "A", "feat/x", repo) is True)
+        # Held-back origin B (error this run): re-examined, NOT sealed -> not dropped.
+        check("held-back origin -> branch re-examined (regression guard)",
+              kb.branch_skippable(state, "B", "feat/x", repo) is False)
+
+
 def main():
     test_fetch_integration_only()
     test_fetch_unreachable_is_fast_failure()
     test_branch_unchanged_since_hwm()
+    test_date_floor_skip()
+    test_effective_since_floor()
+    test_two_run_and_error_gate()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 
