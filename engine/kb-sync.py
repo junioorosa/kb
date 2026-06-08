@@ -3,8 +3,9 @@
 
 Scans workspaces from ~/.claude/kb-workspaces.json for git repos, dedupes by
 remote.origin.url, then for each canonical repo:
-  - Fetches (best-effort, --prune) so integration refs are current and deleted
-    remote branches are pruned.
+  - Refreshes ONLY the integration/production refs it needs, by exact refspec
+    (read-only on the remote; no all-heads wildcard, no --prune, nothing deleted
+    locally). Best-effort: offline -> proceed on stale refs.
   - For each free-form work branch (the branch name is the match key; an
     optional "<type>/" prefix groups the KB folder), captures author commits
     and asks Claude to create/update the KB entry.
@@ -277,9 +278,12 @@ def load_config():
 
 
 def run_git(args, cwd, check=False, timeout=30):
+    # GIT_TERMINAL_PROMPT=0: a headless sync must never block on a credential
+    # prompt — fail fast instead of hanging to the timeout.
     r = subprocess.run(
         ["git", *args], cwd=cwd, capture_output=True,
         text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
     if check and r.returncode != 0:
         raise RuntimeError(f"git {args} failed in {cwd}: {r.stderr}")
@@ -383,15 +387,54 @@ def list_candidate_branches(repo: Path, excluded: set):
     return out
 
 
-def fetch_repo(repo: Path):
-    """Best-effort `git fetch --prune` so integration refs are current and deleted
-    remote branches are pruned (branch-gone detection). Network/credential failures
-    are non-fatal (offline -> stale local refs)."""
-    try:
-        r = run_git(["fetch", "--prune", "--no-tags", "origin"], repo, timeout=180)
-        return r.returncode == 0
-    except Exception:
-        return False
+def fetch_repo(repo: Path, branch_names):
+    """Read-only refresh of ONLY the integration/production refs the sync needs.
+
+    Non-destructive, by design and verifiably:
+      * `git fetch` never writes the remote and never touches `refs/heads/*` or the
+        working tree — it only reads the remote and updates the local mirror under
+        `refs/remotes/origin/*`. Your branches, commits and uncommitted work are
+        untouched.
+      * We fetch each needed branch by its EXACT refspec
+        (`+refs/heads/<b>:refs/remotes/origin/<b>`), one at a time — never a `*`
+        pattern. A remote with branches differing only in case (e.g. `Feat/x` and
+        `feat/x`) makes a wildcard `fetch --prune` of all heads fail on a
+        case-insensitive filesystem; an exact ref name cannot collide with itself.
+      * No `--prune`: nothing is deleted locally (the old all-heads prune was what
+        churned/deleted mirror refs).
+
+    Returns (ok, reason): ok=True if at least one requested ref fetched cleanly;
+    reason carries the last git error when nothing fetched (offline / unreachable).
+    A branch the repo's remote doesn't have ("couldn't find remote ref") is expected
+    and never counts as a failure on its own.
+    """
+    any_ok, last_err = False, ""
+    for b in branch_names:
+        refspec = f"+refs/heads/{b}:refs/remotes/origin/{b}"
+        try:
+            r = run_git(["fetch", "--no-tags", "origin", refspec], repo, timeout=120)
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            continue
+        if r.returncode == 0:
+            any_ok = True
+        elif "couldn't find remote ref" not in (r.stderr or "").lower():
+            err = (r.stderr or "").strip().splitlines()
+            last_err = err[-1] if err else f"rc={r.returncode}"
+    return any_ok, last_err
+
+
+def branch_unchanged_since_hwm(state: dict, origin_norm: str, branch: str, repo: Path) -> bool:
+    """True iff this branch's tip equals the stored high-water mark — i.e. it has
+    ZERO new commits since the last successful capture, so the whole per-branch
+    walk can be skipped. Exact (sha equality), not a date horizon: a branch with an
+    old-but-never-captured commit has tip != HWM and is still walked, so a sync that
+    was down for days can't silently drop work."""
+    hwm = state.get("last_processed_commit", {}).get(origin_norm, {}).get(branch)
+    if not hwm:
+        return False  # never captured -> always walk (bounded by effective_since)
+    tip = run_git(["rev-parse", branch], repo).stdout.strip()
+    return bool(tip) and tip == hwm
 
 
 def resolve_default_branch(repo: Path, candidates):
@@ -1108,8 +1151,9 @@ class RunReport:
         self.repos_discovered = 0
         self.repos_fetched = 0
 
-    def add_fetch_failure(self, workspace: str, repo_rel: str, origin: str):
-        self.fetch_failures.append({"workspace": workspace, "repo_rel": repo_rel, "origin": origin})
+    def add_fetch_failure(self, workspace: str, repo_rel: str, origin: str, reason: str = ""):
+        self.fetch_failures.append({"workspace": workspace, "repo_rel": repo_rel,
+                                    "origin": origin, "reason": reason})
 
     def note_scan(self, discovered: int, fetched: int):
         """Accumulate repo scan/fetch counts across workspaces (sync-health scope)."""
@@ -1420,20 +1464,26 @@ def main():
 
         repos = discover_repos(wpath)
         print(f"  discovered={len(repos)} repos")
+        # Refresh ONLY the refs the sync needs: integration (capture's `--not`) plus
+        # production (finalize's merge target), by exact refspec. Read-only on the
+        # remote; no all-heads wildcard, no --prune.
+        fetch_names = list(dict.fromkeys([*integration_branches, *production_branches]))
         ok_count, fetch_failed = 0, []
         for r in repos:
-            if fetch_repo(r):
+            if not repo_origin(r):
+                continue  # local-only repo: nothing to fetch, no staleness risk
+            ok, reason = fetch_repo(r, fetch_names)
+            if ok:
                 ok_count += 1
-            elif repo_origin(r):
-                # has a remote but fetch failed -> origin/* refs are stale, real risk.
-                # repos with no remote are skipped (local is authoritative, no staleness).
-                fetch_failed.append(r)
-        print(f"  fetched (prune) {ok_count}/{len(repos)} repos")
+            else:
+                # has a remote but no integration ref fetched -> origin/* may be stale.
+                fetch_failed.append((r, reason))
+        print(f"  fetched {ok_count} repos (integration refs, read-only)")
         report.note_scan(len(repos), ok_count)
-        for r in fetch_failed:
+        for r, reason in fetch_failed:
             rel = r.relative_to(wpath)
-            print(f"    [warn] fetch FAILED (origin unreachable): {rel} — capture/finalize using STALE refs")
-            report.add_fetch_failure(ws["name"], str(rel), repo_origin(r) or "")
+            print(f"    [warn] fetch FAILED ({reason or 'origin unreachable'}): {rel} — capture/finalize using STALE refs")
+            report.add_fetch_failure(ws["name"], str(rel), repo_origin(r) or "", reason)
 
         # Embedding-backed retrieval store: reindex vault (and transcripts of
         # open branches) so capture/finalize can inject top-K snippets inline
@@ -1472,6 +1522,13 @@ def main():
                 origin_norm = normalize_origin(repo_origin(r)) or str(r)
                 for branch in list_candidate_branches(r, excluded_branches):
                     if args.branch and branch != args.branch:
+                        continue
+                    # Cheap exact skip: tip == HWM means zero new commits since the
+                    # last successful capture -> nothing to do. Collapses the full
+                    # local-branch walk to the few that actually moved. Skipped only
+                    # on the normal HWM path (the override flags force a re-walk).
+                    if (args.since_hours is None and not args.ignore_hwm
+                            and branch_unchanged_since_hwm(state, origin_norm, branch, r)):
                         continue
                     tipo, slug, folder_rel = parse_branch(branch)
                     if args.since_hours is not None:
