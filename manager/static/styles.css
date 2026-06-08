@@ -71,6 +71,8 @@ body {
 .card-wide { grid-column: 1 / -1; }
 .card h2 { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
 .card-sub { color: var(--text-dim); font-size: 13.5px; margin: 6px 0 18px; }
+.card-note { color: var(--text-faint); font-size: 12px; line-height: 1.55; margin: 14px 0 0; }
+.vr-state { font-size: 13.5px; font-weight: 550; margin: 0 0 16px; }
 
 /* Key-value status */
 .kv { display: flex; flex-direction: column; gap: 12px; }

@@ -181,6 +181,10 @@ class Handler(BaseHTTPRequestHandler):
             # offline network never blocks the page load; install.update_check is
             # fail-soft and always returns a reason instead of raising.
             return self._send(200, install.update_check())
+        if path == "/api/vault-remote":
+            # Read-only: does the vault have a git remote, and which. The connect
+            # action is POST-only (it writes git config + pushes).
+            return self._send(200, install.vault_remote_status())
         if path.startswith("/api/knowledge/"):
             return self._knowledge(path[len("/api/knowledge/"):])
         return self._send(404, {"error": "not found"})
@@ -249,6 +253,17 @@ class Handler(BaseHTTPRequestHandler):
             # installer; the manager never deploys files itself). Refuses a dirty or
             # diverged tree and is reversible via the deploy backup.
             return self._send(200, install.update_apply())
+        if path == "/api/vault-remote/connect":
+            # One-time: connect the vault to a user-owned remote + push. Delegates to
+            # the installer (adds 'origin', never force-pushes, never clobbers an
+            # existing remote). The nightly sync still never auto-pushes.
+            url = str((body or {}).get("url", "")).strip()
+            return self._send(200, install.vault_connect_remote(url))
+        if path == "/api/vault-remote/pull":
+            # Read side of a shared vault: fetch + merge the team's latest. Delegates
+            # to the installer (refuses a dirty tree, aborts on conflict so no marker
+            # lands in a learning, never force, never pushes).
+            return self._send(200, install.vault_pull_remote())
         return self._send(404, {"error": "not found"})
 
 

@@ -60,6 +60,26 @@
         </div>
       </section>
 
+      <!-- Vault backup / team remote -->
+      <section class="card">
+        <h2>Vault backup</h2>
+        <p class="card-sub">Local-only by default. Optionally connect the vault to a private git remote <b>you own</b> — to back it up, or to share it as a team knowledge base. One-time; the nightly sync never auto-pushes.</p>
+        <div id="vr-state" class="vr-state">—</div>
+        <label class="field" id="vr-form">
+          <span>Remote URL</span>
+          <input type="text" id="vr-input" placeholder="git@github.com:you/kb-vault.git" spellcheck="false" />
+        </label>
+        <div class="row">
+          <button class="btn btn-primary" id="vr-connect">Connect remote</button>
+          <span class="inline-msg" id="vr-msg"></span>
+        </div>
+        <div class="row hidden" id="vr-pull-row">
+          <button class="btn btn-ghost" id="vr-pull">Pull from remote</button>
+          <span class="inline-msg" id="vr-pull-msg"></span>
+        </div>
+        <p class="card-note">Set up git auth first (SSH key or OS credential manager). The URL is saved by git as the vault's remote — no token is ever stored here. Make sure the remote is <b>private</b>: connecting publishes your vault's contents to it.</p>
+      </section>
+
       <!-- Workspaces -->
       <section class="card">
         <h2>Workspaces</h2>

@@ -161,11 +161,17 @@ def status() -> dict:
 # bumped VERSION is the author's deliberate release marker, so a mid-work commit on
 # the branch tip doesn't read as an update.
 
-def _git(*args, timeout: int = 60):
+def _git_at(cwd: Path, *args, timeout: int = 60):
+    # GIT_TERMINAL_PROMPT=0: never block on a credential prompt — a missing auth
+    # setup must fail fast (this runs under the non-interactive manager), not hang.
     return subprocess.run(
-        ["git", *args], cwd=str(REPO_ROOT), capture_output=True, text=True,
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
         timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
+
+
+def _git(*args, timeout: int = 60):
+    return _git_at(REPO_ROOT, *args, timeout=timeout)
 
 
 def _semver(s: str) -> tuple:
@@ -257,6 +263,190 @@ def update_apply(cdir: Path | None = None) -> dict:
     return rep
 
 
+# --- Vault remote (one-time connect; NEVER auto-pushes) ----------------------
+# The vault is local-only by default. A user may deliberately connect it to a
+# private remote they own — as a backup, or to share it as a team knowledge base.
+# This is the one-time "let's make a team repo" gesture, not an ongoing automation:
+# the nightly sync still only commits locally and never pushes (commit_vault). Two
+# rules mirror the update path: nothing is ever force-pushed (a non-fast-forward to
+# a non-empty remote is reported, never overwritten), and an existing remote is
+# never clobbered. Auth is out-of-band (SSH key / OS credential manager) — no token
+# is ever stored here.
+
+def _vault_path(cdir: Path | None = None) -> Path | None:
+    """The configured vault path, or None. NEVER fabricated — an absent/invalid
+    config yields None, callers report it. Mirrors engine kb_config.resolve_vault's
+    order exactly (KB_VAULT env first, then kb-workspaces.json 'vault') so this and
+    the manager's knowledge view always resolve the SAME vault."""
+    env = os.environ.get("KB_VAULT")
+    if env and env.strip():
+        return Path(env.strip())
+    cdir = cdir or claude_dir()
+    cfg = cdir / "kb-workspaces.json"
+    if not cfg.exists():
+        return None
+    try:
+        v = json.loads(cfg.read_text(encoding="utf-8")).get("vault")
+    except json.JSONDecodeError:
+        return None
+    return Path(v) if v else None
+
+
+def _is_git_repo(path: Path) -> bool:
+    r = _git_at(path, "rev-parse", "--is-inside-work-tree")
+    return r.returncode == 0 and r.stdout.strip() == "true"
+
+
+def vault_remote_status(cdir: Path | None = None) -> dict:
+    """Report whether the configured vault has a git remote (and which). Read-only."""
+    out = {"vault": None, "is_git": False, "has_remote": False,
+           "remote": None, "url": None, "branch": None, "reason": None}
+    try:
+        v = _vault_path(cdir)
+        if not v:
+            out["reason"] = "no vault configured"
+            return out
+        out["vault"] = str(v)
+        if not v.exists():
+            out["reason"] = "vault path does not exist"
+            return out
+        if not _is_git_repo(v):
+            out["reason"] = "vault is not a git repo"
+            return out
+        out["is_git"] = True
+        br = _git_at(v, "rev-parse", "--abbrev-ref", "HEAD")
+        out["branch"] = br.stdout.strip() if br.returncode == 0 else None
+        rem = _git_at(v, "remote")
+        remotes = rem.stdout.split() if rem.returncode == 0 else []
+        if not remotes:
+            return out  # local-only: has_remote stays False
+        name = "origin" if "origin" in remotes else remotes[0]
+        u = _git_at(v, "remote", "get-url", name)
+        out["has_remote"] = True
+        out["remote"] = name
+        out["url"] = u.stdout.strip() if u.returncode == 0 else None
+    except Exception as e:
+        out["reason"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def vault_connect_remote(url: str, cdir: Path | None = None) -> dict:
+    """Connect the vault to a remote the user owns and publish it (one-time).
+    Adds 'origin' + `git push -u`. Refuses to clobber an existing remote and never
+    force-pushes. If the push fails (auth not set up, or a local-only guard hook),
+    the remote stays configured and the caller is told to push by hand."""
+    rep = {"connected": False, "pushed": False, "vault": None, "remote": "origin",
+           "url": None, "branch": None, "reason": None, "note": None}
+    try:
+        url = (url or "").strip()
+        rep["url"] = url
+        if not re.match(r"^(https://|git@|ssh://|git://|file://)", url):
+            rep["reason"] = "remote URL must start with https://, git@, ssh://, git:// or file://"
+            return rep
+        v = _vault_path(cdir)
+        if not v:
+            rep["reason"] = "no vault configured — set the vault path first."
+            return rep
+        rep["vault"] = str(v)
+        if not v.exists() or not _is_git_repo(v):
+            rep["reason"] = "vault is missing or not a git repo."
+            return rep
+        rem = _git_at(v, "remote")
+        if "origin" in (rem.stdout.split() if rem.returncode == 0 else []):
+            cur = _git_at(v, "remote", "get-url", "origin")
+            rep["reason"] = ("vault already has an 'origin' remote (" + (cur.stdout.strip() or "?")
+                             + "). Repoint it by hand if that's intended.")
+            return rep
+        br = _git_at(v, "rev-parse", "--abbrev-ref", "HEAD")
+        branch = br.stdout.strip() if br.returncode == 0 else "main"
+        rep["branch"] = branch
+        add = _git_at(v, "remote", "add", "origin", url)
+        if add.returncode != 0:
+            rep["reason"] = "git remote add failed: " + (_last_line(add.stderr) or "unknown")
+            return rep
+        rep["connected"] = True
+        # First publish. -u sets the upstream so later pushes are a bare `git push`.
+        # No --force, ever: a non-empty remote with diverging history rejects this,
+        # which we report rather than overwrite.
+        ps = _git_at(v, "push", "-u", "origin", branch, timeout=120)
+        if ps.returncode != 0:
+            rep["reason"] = "remote added, but the first push failed: " + (_last_line(ps.stderr) or "unknown")
+            rep["note"] = ("Set up git auth (SSH key or credential manager) — note a local-only "
+                           "guard hook also blocks pushing by design — then run "
+                           f"`git push -u origin {branch}` from the vault. The remote stays configured.")
+            return rep
+        rep["pushed"] = True
+        rep["note"] = f"Vault published to {url} ({branch}). Teammates can clone it now."
+    except Exception as e:
+        rep["reason"] = f"{type(e).__name__}: {e}"
+    return rep
+
+
+def vault_pull_remote(cdir: Path | None = None) -> dict:
+    """Pull the team's latest from the vault's remote (the read side of a shared KB).
+    fetch + merge: disjoint per-file learnings auto-merge cleanly (the common case).
+    Safety: refuses a dirty tree; on a real content conflict it ABORTS the merge,
+    restoring the clean pre-merge tree — a conflict marker never lands in a learning,
+    the user resolves by hand. The remote is only ever read (fetch); never force, never
+    pushed here."""
+    rep = {"pulled": False, "vault": None, "branch": None, "remote": "origin",
+           "merged_commits": 0, "already_up_to_date": False, "conflict": False,
+           "reason": None, "note": None}
+    try:
+        v = _vault_path(cdir)
+        if not v:
+            rep["reason"] = "no vault configured."
+            return rep
+        rep["vault"] = str(v)
+        if not v.exists() or not _is_git_repo(v):
+            rep["reason"] = "vault is missing or not a git repo."
+            return rep
+        rem = _git_at(v, "remote")
+        if "origin" not in (rem.stdout.split() if rem.returncode == 0 else []):
+            rep["reason"] = "vault has no 'origin' remote — connect it first."
+            return rep
+        dirty = _git_at(v, "status", "--porcelain")
+        if dirty.returncode != 0:
+            rep["reason"] = "git status failed: " + (_last_line(dirty.stderr) or "unknown")
+            return rep
+        if dirty.stdout.strip():
+            rep["reason"] = ("vault has uncommitted changes — let the next sync commit them "
+                             "(or commit by hand) before pulling.")
+            return rep
+        br = _git_at(v, "rev-parse", "--abbrev-ref", "HEAD")
+        branch = br.stdout.strip() if br.returncode == 0 else "main"
+        rep["branch"] = branch
+        before = _git_at(v, "rev-parse", "HEAD").stdout.strip()
+        fr = _git_at(v, "fetch", "--no-tags", "origin", branch, timeout=60)
+        if fr.returncode != 0:
+            rep["reason"] = "fetch failed (offline?): " + (_last_line(fr.stderr) or f"rc={fr.returncode}")
+            return rep
+        mg = _git_at(v, "merge", "--no-edit", f"origin/{branch}", timeout=60)
+        if mg.returncode != 0:
+            # Real conflict (or other merge failure): abort to restore the clean
+            # pre-merge tree so no half-merged / conflict-marked learning persists.
+            _git_at(v, "merge", "--abort")
+            rep["conflict"] = True
+            rep["reason"] = (f"the remote and your vault edited the same learning — auto-merge couldn't "
+                             "reconcile it, so nothing changed. Resolve by hand in the vault "
+                             f"(`git merge origin/{branch}`), then retry.")
+            return rep
+        after = _git_at(v, "rev-parse", "HEAD").stdout.strip()
+        if after == before:
+            rep["pulled"] = True
+            rep["already_up_to_date"] = True
+            rep["note"] = "Already up to date — nothing new from the remote."
+            return rep
+        cnt = _git_at(v, "rev-list", "--count", f"{before}..{after}")
+        rep["merged_commits"] = int(cnt.stdout.strip() or 0) if cnt.returncode == 0 else 0
+        rep["pulled"] = True
+        rep["note"] = ("Pulled the team's latest. New learnings are on disk now; retrieval picks "
+                       "them up on the next sync/reindex.")
+    except Exception as e:
+        rep["reason"] = f"{type(e).__name__}: {e}"
+    return rep
+
+
 def _summary(rep: dict) -> str:
     lines = [f"KB installer [{rep['mode']}]  v{rep['version']['from'] or '-'} -> v{rep['version']['to']}"]
     d = rep["deploy"]
@@ -297,6 +487,9 @@ if __name__ == "__main__":
     ap.add_argument("--status", action="store_true", help="show installed state")
     ap.add_argument("--update-check", action="store_true", help="check the remote for a newer VERSION (read-only)")
     ap.add_argument("--update", action="store_true", help="fast-forward to the remote + re-deploy (reversible)")
+    ap.add_argument("--vault-remote", action="store_true", help="show the vault's git remote status")
+    ap.add_argument("--vault-connect", metavar="URL", help="connect the vault to a remote you own + push (one-time)")
+    ap.add_argument("--vault-pull", action="store_true", help="pull the team's latest into the vault (fetch + merge, aborts on conflict)")
     ap.add_argument("--time", default=scheduler.DEFAULT_TIME, help="daily kb-sync time HH:MM (default 01:00)")
     ap.add_argument("--skip-scheduler", action="store_true", help="install everything but don't touch the OS scheduler")
     ap.add_argument("--skip-shortcut", action="store_true", help="install everything but don't create the desktop shortcut")
@@ -313,6 +506,12 @@ if __name__ == "__main__":
         print(json.dumps(update_check(), indent=2))
     elif args.update:
         print(json.dumps(update_apply(), indent=2))
+    elif args.vault_remote:
+        print(json.dumps(vault_remote_status(), indent=2))
+    elif args.vault_connect:
+        print(json.dumps(vault_connect_remote(args.vault_connect), indent=2))
+    elif args.vault_pull:
+        print(json.dumps(vault_pull_remote(), indent=2))
     else:
         sched = False if args.skip_scheduler else None
         shortc = False if args.skip_shortcut else None

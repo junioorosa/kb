@@ -135,6 +135,79 @@ async function applyUpdate() {
   checkUpdate();
 }
 
+// --- Vault remote (one-time connect; never auto-pushes) -------------------
+// The vault is local-only by default. This lets the user deliberately connect it
+// to a private remote they own (backup, or a shared team KB). The nightly sync
+// never pushes; this is the explicit "make it a team repo" gesture.
+function renderVaultRemote(v) {
+  const state = $("vr-state"), form = $("vr-form"), btn = $("vr-connect"), pullRow = $("vr-pull-row");
+  const hide = (el, h) => el.classList.toggle("hidden", h);
+  if (!v || !v.is_git) {
+    state.innerHTML = dot("warn") + esc((v && v.reason) || "vault is not a git repo");
+    hide(form, true); hide(btn, true); hide(pullRow, true);
+    return;
+  }
+  if (v.has_remote) {
+    // Connected: hide the connect form, show the team-read "Pull" control.
+    state.innerHTML = dot("ok") + `connected → ${esc(v.url || v.remote)}`;
+    hide(form, true); hide(btn, true); hide(pullRow, false);
+  } else {
+    state.innerHTML = dot("warn") + "local only — not connected to any remote";
+    hide(form, false); hide(btn, false); hide(pullRow, true);
+  }
+}
+
+async function loadVaultRemote() {
+  let v;
+  try { v = await api("GET", "/api/vault-remote"); }
+  catch (e) { $("vr-state").innerHTML = dot("warn") + "couldn't read remote state"; return; }
+  renderVaultRemote(v);
+}
+
+async function connectVaultRemote() {
+  const url = $("vr-input").value.trim();
+  if (!url) { setMsg("vr-msg", "enter a remote URL", "err"); return; }
+  if (!confirm("Connect the vault to:\n\n" + url + "\n\n" +
+    "This publishes your vault's contents to that remote. Make sure it's a PRIVATE repo you own. Continue?")) return;
+  const btn = $("vr-connect");
+  btn.disabled = true;
+  setMsg("vr-msg", "connecting…", "");
+  let r;
+  try { r = await api("POST", "/api/vault-remote/connect", { url }); }
+  catch (e) { setMsg("vr-msg", e.message, "err"); btn.disabled = false; return; }
+  btn.disabled = false;
+  if (r.pushed) {
+    setMsg("vr-msg", "connected + pushed", "ok");
+    toast("Vault published to remote", "ok");
+    loadVaultRemote();
+  } else if (r.connected) {
+    // Remote added but the push failed (auth not set up / guard hook). The remote
+    // is set — surface the reason so the user can finish the push by hand.
+    setMsg("vr-msg", r.reason || "remote added; push pending", "err");
+    loadVaultRemote();
+  } else {
+    setMsg("vr-msg", r.reason || "could not connect", "err");
+  }
+}
+
+async function pullVaultRemote() {
+  const btn = $("vr-pull");
+  btn.disabled = true;
+  setMsg("vr-pull-msg", "pulling…", "");
+  let r;
+  try { r = await api("POST", "/api/vault-remote/pull"); }
+  catch (e) { setMsg("vr-pull-msg", e.message, "err"); btn.disabled = false; return; }
+  btn.disabled = false;
+  if (r.pulled) {
+    const txt = r.already_up_to_date ? "already up to date"
+      : `pulled ${r.merged_commits} commit${r.merged_commits === 1 ? "" : "s"}`;
+    setMsg("vr-pull-msg", txt, "ok");
+    if (!r.already_up_to_date) toast("Pulled team updates — reindex on next sync", "ok");
+  } else {
+    setMsg("vr-pull-msg", r.reason || "pull failed", "err");
+  }
+}
+
 // --- Config (vault + workspaces) ------------------------------------------
 let WORKSPACES = [];
 
@@ -374,6 +447,8 @@ function init() {
   $("integ-toggle").addEventListener("change", toggleIntegration);
   $("check-update").addEventListener("click", () => checkUpdate({ manual: true }));
   $("apply-update").addEventListener("click", applyUpdate);
+  $("vr-connect").addEventListener("click", connectVaultRemote);
+  $("vr-pull").addEventListener("click", pullVaultRemote);
 
   document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => switchView(t.dataset.view)));
   $("kn-project").addEventListener("change", (e) => { KN.project = e.target.value; loadLearnings(); });
@@ -387,6 +462,7 @@ function init() {
   loadStatus();
   loadConfig();
   loadIntegration();
+  loadVaultRemote();         // is the vault connected to a remote? (read-only)
   checkUpdate();             // fail-soft remote probe; never blocks the page render
   switchView("knowledge");  // knowledge is the default landing view
 }

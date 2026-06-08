@@ -316,10 +316,11 @@ def run_git(args, cwd, check=False, timeout=30):
 def commit_vault(vault: Path) -> None:
     """Commit the vault's changes to its LOCAL git repo, if any. NEVER pushes.
 
-    Local-only by design: the vault holds your private knowledge and has no remote
-    (a pre-push hook also blocks pushing). Safe no-op when the vault isn't a git
-    repo or has nothing to commit. Failures are logged, never fatal — a sync run
-    must not break because versioning hiccuped.
+    The vault is local-only by default; even when the user has connected it to a
+    remote, the sync only ever commits locally — publishing stays a deliberate
+    action (the manager's connect/pull), never an automatic push. Safe no-op when
+    the vault isn't a git repo or has nothing to commit. Failures are logged, never
+    fatal — a sync run must not break because versioning hiccuped.
     """
     try:
         if not (vault / ".git").exists():
@@ -336,6 +337,46 @@ def commit_vault(vault: Path) -> None:
             print(f"vault commit skipped/failed (non-fatal): {r.stderr.strip()[:200]}")
     except Exception as e:
         print(f"vault commit error (non-fatal): {type(e).__name__}: {e}")
+
+
+def fetch_vault(vault: Path) -> None:
+    """If the vault is connected to a remote, refresh from it BEFORE the sync runs.
+
+    Read side of a shared/team vault: fetch the remote, then fast-forward the local
+    branch ONLY when it's strictly behind and the tree is clean (zero-risk). A
+    diverged local — your own captures not yet pushed — is left untouched: reconcile
+    it deliberately via the manager's 'Pull from remote' (a real merge that aborts on
+    conflict). This never pushes, never force, and never runs an unattended merge that
+    could leave a conflict in a learning. No-op for a local-only vault (no remote) —
+    the default case — so a private vault is never touched. Fully non-fatal.
+    """
+    try:
+        if not (vault / ".git").exists():
+            return
+        remotes = run_git(["remote"], cwd=vault, timeout=15)
+        if "origin" not in remotes.stdout.split():
+            return  # local-only vault: nothing to fetch (the default)
+        branch = run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=vault, timeout=15).stdout.strip() or "main"
+        fr = run_git(["fetch", "--no-tags", "origin", branch], cwd=vault, timeout=60)
+        if fr.returncode != 0:
+            print(f"vault fetch skipped (non-fatal): {fr.stderr.strip()[:200]}")
+            return
+        # Fast-forward only when strictly behind on a clean tree. Diverged or dirty ->
+        # leave it for the deliberate manual Pull (no unattended merge / conflicts).
+        if run_git(["status", "--porcelain"], cwd=vault, timeout=15).stdout.strip():
+            print("vault fetched; local changes present -> not fast-forwarding (use manual Pull if needed).")
+            return
+        before = run_git(["rev-parse", "HEAD"], cwd=vault, timeout=15).stdout.strip()
+        mg = run_git(["merge", "--ff-only", f"origin/{branch}"], cwd=vault, timeout=30)
+        if mg.returncode != 0:
+            print(f"vault fetched; local diverged from origin/{branch} -> use the manager's 'Pull from remote' to merge.")
+            return
+        after = run_git(["rev-parse", "HEAD"], cwd=vault, timeout=15).stdout.strip()
+        if after != before:
+            cnt = run_git(["rev-list", "--count", f"{before}..{after}"], cwd=vault, timeout=15).stdout.strip()
+            print(f"vault fast-forwarded to team's latest ({cnt} commit(s) from origin/{branch}).")
+    except Exception as e:
+        print(f"vault fetch error (non-fatal): {type(e).__name__}: {e}")
 
 
 def discover_repos(workspace_path: Path, max_depth: int = 4):
@@ -1507,6 +1548,13 @@ def main():
     partial_run = bool(args.repo or args.branch or args.since_hours is not None
                        or args.ignore_hwm or args.skip_capture or args.skip_finalize)
     report = RunReport()
+
+    # Team read-side: if the vault is connected to a remote, refresh from it before
+    # capturing. Fast-forwards when the local vault is strictly behind; a diverged
+    # local (your own un-pushed captures) only gets the fetch and is reconciled via
+    # the manager's manual Pull. No-op for a local-only vault. Never pushes.
+    if not args.dry_run:
+        fetch_vault(vault)
 
     for ws in cfg["workspaces"]:
         if args.workspace and ws["name"] != args.workspace:

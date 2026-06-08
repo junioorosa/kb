@@ -11,9 +11,11 @@ branch lifecycle, merge → resolved — not a flat vector blob.
 ## Two repos, two destinations (hard rule)
 
 - **This repo (tool SOURCE)** — the engine + adapters. Public-bound, no user data.
-- **Your vault (DATA)** — your knowledge, a separate **local-only** git repo with
-  **no remote, ever**. It never lives in this repo. When someone installs KB, their
-  vault is their own private business and has nothing to do with this code.
+- **Your vault (DATA)** — your knowledge, a separate git repo that is **local-only by
+  default**. It never lives in this repo, and the nightly sync only ever commits to it
+  locally — it never pushes. If you want a backup or a shared team KB you can connect
+  it to a private remote **you own** (a deliberate one-time action in the manager); the
+  vault is still entirely yours and has nothing to do with this code.
 
 ## Layout
 
