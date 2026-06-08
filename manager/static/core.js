@@ -55,7 +55,7 @@
       '  <div class="core-loop core-reveal">',
       '    <div class="core-loop-ring"></div>',
       '    <div class="core-orbit-dot"></div>',
-      '    <div class="core-loop-center"><div class="lc-k">loop</div><div class="lc-v">trabalho → memória</div></div>',
+      '    <div class="core-loop-center"><span class="lc-a">trabalho</span><span class="lc-arrow">↓</span><span class="lc-b">memória</span></div>',
       '    <div class="core-node" style="--x:0px;--y:-128px"><div class="cn-i">⌨️</div><div class="cn-t">Trabalho</div><div class="cn-s">commits + conversa</div></div>',
       '    <div class="core-node" style="--x:128px;--y:0px"><div class="cn-i">🌙</div><div class="cn-t">Captura</div><div class="cn-s">git + conversa</div></div>',
       '    <div class="core-node" style="--x:0px;--y:128px"><div class="cn-i">🧩</div><div class="cn-t">Índice</div><div class="cn-s">embeddings + BM25</div></div>',
@@ -142,7 +142,7 @@
       '      <p>Texto → ponto num espaço onde a distância é a diferença de sentido. A query acende e os vizinhos semânticos se agrupam ao redor dela.</p>',
       '      <h4>Por que <span class="core-mono">paraphrase-multilingual-MiniLM-L12-v2</span></h4>',
       '      <ul class="embed-why">',
-      '        <li><span class="mk">PT+EN</span><span><b>Multilingual:</b> o vault é PT, as queries misturam PT e inglês técnico — tudo no mesmo espaço.</span></li>',
+      '        <li><span class="mk">i18n</span><span><b>Multilingual:</b> vault e queries podem estar em qualquer idioma — o modelo casa o <i>sentido</i> mesmo entre línguas (query em PT acha learning em EN, e vice-versa).</span></li>',
       '        <li><span class="mk">RAM</span><span><b>Pequeno e rápido:</b> roda local (ONNX/fastembed), sem API key, sem mandar seu código pra ninguém.</span></li>',
       '        <li><span class="mk">384d</span><span><b>Bom o bastante:</b> dimensão enxuta = índice leve, latência baixa, cabe em memória.</span></li>',
       '      </ul>',
@@ -192,7 +192,7 @@
       '    <div class="tier mid" style="--w:0.6"><span class="tl">mid</span><span class="tbar"><i></i></span><span class="tr">0.45 – 0.75 · injeta</span></div>',
       '    <div class="tier low" style="--w:0.25"><span class="tl">low</span><span class="tbar"><i></i></span><span class="tr">&lt; 0.45 · fica de fora</span></div>',
       '  </div>',
-      '  <p class="core-note">Daemon fora? cai pra BM25 puro com tiers por score absoluto (high 8.0 / mid 5.0). <b>GraphRAG 1-hop</b>: os 2 melhores puxam vizinhos via <span class="core-mono">[[wikilinks]]</span> do Obsidian.</p>',
+      '  <p class="core-note">Daemon fora? cai pra BM25 puro com tiers por score absoluto (high 8.0 / mid 5.0). <b>GraphRAG 1-hop</b>: os 2 melhores puxam vizinhos via <span class="core-mono">[[wikilinks]]</span> entre os learnings.</p>',
       '</section>',
 
       // ===== 7. STATUSLINE =====
