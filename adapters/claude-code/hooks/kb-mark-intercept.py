@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -87,6 +88,29 @@ def _vault_root():
         return str(v) if v else None
     except Exception:
         return None
+
+
+def detect_branch(payload: dict) -> str:
+    """The current git branch of the dir Claude Code runs in, or "" if none.
+
+    This is the default when `/kb-mark` is called with no branch: the user is
+    almost always sitting in the repo they want to mark. It's a DETERMINISTIC read
+    of the actual HEAD of `payload.cwd` — not a "best guess" — so it honors the
+    KB rule against guessing the match key. Returns "" (caller falls back to the
+    usage hint) when the dir isn't a git repo, git is absent, or HEAD is detached
+    ("HEAD"), since none of those name a branch to mark."""
+    cwd = payload.get("cwd") or os.getcwd()
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=3,
+        )
+        branch = (r.stdout or "").strip()
+        if r.returncode == 0 and branch and branch != "HEAD":
+            return branch
+    except Exception:
+        pass
+    return ""
 
 
 def set_index_status(rel_folder: str, status: str) -> bool:
@@ -165,10 +189,10 @@ def main() -> int:
 
     if done_mode:
         data = load_sidecar(path)
-        branch = branch_args[0] if branch_args else data.get("branch", "")
+        branch = branch_args[0] if branch_args else (data.get("branch", "") or detect_branch(payload))
         if not branch:
-            emit("KB · /kb-mark --done needs a branch — this session isn't marked. "
-                 "Try: /kb-mark --done <branch>")
+            emit("KB · /kb-mark --done needs a branch — this session isn't marked and the current "
+                 "folder isn't a git repo. Try: /kb-mark --done <branch>")
             return 0
         data["session_id"] = session_id
         data["branch"] = branch
@@ -188,10 +212,10 @@ def main() -> int:
 
     if exp_mode:
         data = load_sidecar(path)
-        branch = branch_args[0] if branch_args else data.get("branch", "")
+        branch = branch_args[0] if branch_args else (data.get("branch", "") or detect_branch(payload))
         if not branch:
-            emit("KB · /kb-mark --experimental needs a branch — this session isn't marked. "
-                 "Try: /kb-mark --experimental <branch>")
+            emit("KB · /kb-mark --experimental needs a branch — this session isn't marked and the "
+                 "current folder isn't a git repo. Try: /kb-mark --experimental <branch>")
             return 0
         cwd = payload.get("cwd") or data.get("cwd") or os.getcwd()
         data["session_id"] = session_id
@@ -218,13 +242,21 @@ def main() -> int:
                  f"the next sync marks it at capture.")
         return 0
 
-    if not branch_args:
-        emit("KB · /kb-mark needs a branch. Examples:\n"
-             "  /kb-mark feat/my-feature   /kb-mark --experimental   "
-             "/kb-mark --done   /kb-mark --remove")
-        return 0
+    # No branch given: default to the current git branch of the dir Claude Code is
+    # in (the repo the user is almost always sitting in). Explicit arg still wins.
+    if branch_args:
+        branch = branch_args[0]
+        auto_detected = False
+    else:
+        branch = detect_branch(payload)
+        auto_detected = bool(branch)
+        if not branch:
+            emit("KB · /kb-mark needs a branch — couldn't read one from the current folder "
+                 "(not a git repo?). Pass it explicitly. Examples:\n"
+                 "  /kb-mark feat/my-feature   /kb-mark --experimental   "
+                 "/kb-mark --done   /kb-mark --remove")
+            return 0
 
-    branch = branch_args[0]
     data = load_sidecar(path)
     cwd = payload.get("cwd") or data.get("cwd") or os.getcwd()
     data["session_id"] = session_id
@@ -240,17 +272,18 @@ def main() -> int:
     try:
         save_sidecar(path, data)
     except Exception as e:
-        emit(f"kb-mark: failed to write sidecar: {e}")
+        emit(f"KB · couldn't save the mark: {e}")
         return 0
 
+    suffix = " (current branch)" if auto_detected else ""
     existing = find_kb_folders(branch)
     if existing:
         more = f" (+{len(existing) - 1} more)" if len(existing) > 1 else ""
-        emit(f"✓ KB · marked this session → \"{branch}\"\n"
+        emit(f"✓ KB · marked this session → \"{branch}\"{suffix}\n"
              f"⚠ A note already exists for this branch: {existing[0]}{more}. The sync will update it "
              f"(not create a new one) — rename the branch if this is different work.")
     else:
-        emit(f"✓ KB · marked this session → \"{branch}\"\n"
+        emit(f"✓ KB · marked this session → \"{branch}\"{suffix}\n"
              f"The next sync captures this branch's work into your knowledge base.")
     return 0
 

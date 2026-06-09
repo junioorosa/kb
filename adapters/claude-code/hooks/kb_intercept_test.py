@@ -82,6 +82,26 @@ def fresh_home() -> Path:
     return Path(tempfile.mkdtemp(prefix="kbihome_"))
 
 
+def make_git_repo(branch: str) -> Path:
+    """A throwaway git repo checked out on `branch` (one empty commit so HEAD is
+    born). Used as payload.cwd to exercise /kb-mark's current-branch auto-detect."""
+    d = Path(tempfile.mkdtemp(prefix="kbigit_"))
+
+    def g(*a):
+        subprocess.run(["git", "-C", str(d), *a], capture_output=True, text=True)
+
+    g("init", "-q")
+    g("config", "user.email", "t@t.test")
+    g("config", "user.name", "t")
+    g("checkout", "-q", "-b", branch)
+    g("commit", "--allow-empty", "-q", "-m", "init")
+    return d
+
+
+def non_git_dir() -> Path:
+    return Path(tempfile.mkdtemp(prefix="kbinogit_"))
+
+
 # ----------------------------- kb-mark -----------------------------
 
 def test_mark_new():
@@ -94,12 +114,48 @@ def test_mark_new():
     check("mark: manual_override flag", sc.get("manual_override") is True, str(sc))
 
 
-def test_mark_no_branch():
+def test_mark_bare_outside_repo():
+    # bare /kb-mark with a non-git cwd: nothing to auto-detect -> usage hint, no write
     home = fresh_home()
-    rc, j, _ = run(MARK, {"prompt": "/kb-mark", "session_id": "s1"}, home)
-    check("mark: empty arg blocks with guidance", j and j.get("decision") == "block"
+    rc, j, _ = run(MARK, {"prompt": "/kb-mark", "session_id": "s1", "cwd": str(non_git_dir())}, home)
+    check("mark: bare outside a repo -> usage hint", j and j.get("decision") == "block"
           and "kb-mark" in j.get("reason", "").lower(), str(j))
-    check("mark: no sidecar written on empty arg", sidecar(home, "s1") == {}, str(sidecar(home, "s1")))
+    check("mark: no sidecar when nothing to detect", sidecar(home, "s1") == {}, str(sidecar(home, "s1")))
+
+
+def test_mark_autodetect_current_branch():
+    # bare /kb-mark inside a repo: defaults to the current branch
+    home = fresh_home()
+    repo = make_git_repo("feat/autodetect")
+    rc, j, _ = run(MARK, {"prompt": "/kb-mark", "session_id": "s1", "cwd": str(repo)}, home)
+    sc = sidecar(home, "s1")
+    r = j.get("reason", "") if j else ""
+    check("autodetect: marks current branch", sc.get("branch") == "feat/autodetect", str(sc))
+    check("autodetect: reason names branch + (current branch)",
+          "feat/autodetect" in r and "current branch" in r, r)
+
+
+def test_mark_explicit_overrides_git():
+    # explicit arg wins over the repo's branch and shows no "(current branch)" tag
+    home = fresh_home()
+    repo = make_git_repo("feat/repo-branch")
+    rc, j, _ = run(MARK, {"prompt": "/kb-mark feat/explicit", "session_id": "s1", "cwd": str(repo)}, home)
+    sc = sidecar(home, "s1")
+    r = j.get("reason", "") if j else ""
+    check("explicit: arg wins over git branch", sc.get("branch") == "feat/explicit", str(sc))
+    check("explicit: no (current branch) suffix", "current branch" not in r, r)
+
+
+def test_done_autodetect_when_unmarked():
+    # /kb-mark --done with no sidecar falls back to the current git branch
+    home = fresh_home()
+    repo = make_git_repo("fix/done-auto")
+    rc, j, _ = run(MARK, {"prompt": "/kb-mark --done", "session_id": "s1", "cwd": str(repo)}, home)
+    sc = sidecar(home, "s1")
+    r = j.get("reason", "") if j else ""
+    check("done: autodetects branch when unmarked",
+          sc.get("manual_done") is True and sc.get("branch") == "fix/done-auto", str(sc))
+    check("done: reason names detected branch", "fix/done-auto" in r, r)
 
 
 def test_mark_remove():

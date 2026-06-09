@@ -6,20 +6,23 @@ argument-hint: <free branch, e.g. feat/my-feature or experiment> | --experimenta
 
 # /kb-mark
 
-Marks the current session with the given branch. Branch marking is **manual only**: `/kb-mark` is the sole writer of the session↔branch sidecar — there is no SessionStart auto-detection. The sync reads the sidecar to locate the branch's transcripts without grepping the JSONL.
+Marks the current session with a branch. Run with **no argument** and it defaults to the **current git branch** of the folder you're in; pass a branch to override. Marking stays manual — `/kb-mark` is the sole writer of the session↔branch sidecar, and there is no passive SessionStart auto-marking. The sync reads the sidecar to locate the branch's transcripts without grepping the JSONL.
 
 The branch name is free-form and is the KB **match key**. A `<type>/` prefix (e.g. `feat/`, `fix/`, or anything else) groups the folder; with no `/`, the ticket sits directly under the project. No numeric id is required.
 
 ## Usage
 
 ```
-/kb-mark feat/my-feature         # groups under the feat/ folder
+/kb-mark                         # default: the current git branch of your folder
+/kb-mark feat/my-feature         # explicit branch, groups under the feat/ folder
 /kb-mark fix/login-timeout       # groups under the fix/ folder
 /kb-mark experiment-x            # no "/" -> directly under the project
 /kb-mark --experimental [branch] # mark status=experimental (retrieval down-weight)
 /kb-mark --done [branch]         # close the ticket (status=resolved on the next sync)
 /kb-mark --remove                # remove the session's mark
 ```
+
+With no `<branch>`, `--experimental` and `--done` also fall back to the current git branch when the session isn't already marked.
 
 ## When to use it
 
