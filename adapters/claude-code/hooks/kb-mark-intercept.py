@@ -145,29 +145,30 @@ def main() -> int:
     branch_args = [a for a in args if not a.startswith("-")]
 
     if not session_id:
-        emit("kb-mark: session_id missing from payload")
+        emit("KB · /kb-mark couldn't run: no session id in the hook payload.")
         return 0
 
     path = sidecar_path(session_id)
 
     if remove_mode:
         if not os.path.exists(path):
-            emit("kb-mark: nothing to remove (session is not marked)")
+            emit("KB · nothing to remove — this session isn't marked.")
             return 0
         prev = load_sidecar(path).get("branch", "?")
         try:
             os.remove(path)
         except Exception as e:
-            emit(f"kb-mark: failed to remove sidecar: {e}")
+            emit(f"KB · couldn't remove the mark: {e}")
             return 0
-        emit(f"kb-mark removed (was {prev})")
+        emit(f"✓ KB · mark removed — this session is no longer tracked (was {prev}).")
         return 0
 
     if done_mode:
         data = load_sidecar(path)
         branch = branch_args[0] if branch_args else data.get("branch", "")
         if not branch:
-            emit("kb-mark --done: no branch (session is not marked). Use /kb-mark --done <branch>")
+            emit("KB · /kb-mark --done needs a branch — this session isn't marked. "
+                 "Try: /kb-mark --done <branch>")
             return 0
         data["session_id"] = session_id
         data["branch"] = branch
@@ -180,17 +181,17 @@ def main() -> int:
         try:
             save_sidecar(path, data)
         except Exception as e:
-            emit(f"kb-mark: failed to write sidecar: {e}")
+            emit(f"KB · couldn't save the mark: {e}")
             return 0
-        emit(f"kb-mark --done -> {branch} (finalized on the next sync)")
+        emit(f"✓ KB · \"{branch}\" marked done — the next sync closes the ticket (status: resolved).")
         return 0
 
     if exp_mode:
         data = load_sidecar(path)
         branch = branch_args[0] if branch_args else data.get("branch", "")
         if not branch:
-            emit("kb-mark --experimental: no branch (session is not marked). "
-                 "Use /kb-mark --experimental <branch>")
+            emit("KB · /kb-mark --experimental needs a branch — this session isn't marked. "
+                 "Try: /kb-mark --experimental <branch>")
             return 0
         cwd = payload.get("cwd") or data.get("cwd") or os.getcwd()
         data["session_id"] = session_id
@@ -201,25 +202,26 @@ def main() -> int:
         try:
             save_sidecar(path, data)
         except Exception as e:
-            emit(f"kb-mark: failed to write sidecar: {e}")
+            emit(f"KB · couldn't save the mark: {e}")
             return 0
         folders = find_kb_folders(branch)
         if len(folders) == 1 and set_index_status(folders[0], "experimental"):
-            emit(f"kb-mark --experimental -> {branch}\n"
-                 f"status=experimental in {folders[0]}/_index.md — retrieval down-weight. "
-                 f"Reverts automatically once the branch merges (sync sets resolved).")
+            emit(f"✓ KB · \"{branch}\" marked experimental — down-ranked in retrieval so it "
+                 f"won't crowd unrelated searches (in {folders[0]}/_index.md). "
+                 f"Reverts automatically when the branch merges.")
         elif len(folders) > 1:
-            emit(f"kb-mark --experimental -> {branch}\n"
-                 f"! multiple KB folders match this branch ({', '.join(folders)}) — ambiguous, "
-                 f"not patching now. The next sync marks the right one (by project) at capture.")
+            emit(f"✓ KB · \"{branch}\" marked experimental.\n"
+                 f"⚠ Several notes match this branch ({', '.join(folders)}) — leaving their status "
+                 f"alone for now; the next sync marks the right one at capture.")
         else:
-            emit(f"kb-mark --experimental -> {branch} (no _index.md yet; "
-                 f"the next sync marks it experimental at capture)")
+            emit(f"✓ KB · \"{branch}\" marked experimental — no note exists yet; "
+                 f"the next sync marks it at capture.")
         return 0
 
     if not branch_args:
-        emit("kb-mark: pass a branch. e.g. /kb-mark feat/my-feature  |  "
-             "/kb-mark --experimental  |  /kb-mark --done  |  /kb-mark --remove")
+        emit("KB · /kb-mark needs a branch. Examples:\n"
+             "  /kb-mark feat/my-feature   /kb-mark --experimental   "
+             "/kb-mark --done   /kb-mark --remove")
         return 0
 
     branch = branch_args[0]
@@ -244,10 +246,12 @@ def main() -> int:
     existing = find_kb_folders(branch)
     if existing:
         more = f" (+{len(existing) - 1} more)" if len(existing) > 1 else ""
-        emit(f"kb-mark -> {branch}\n! a KB folder with this name already exists: {existing[0]}{more} — "
-             f"the sync will UPDATE it (it won't create a new one). If this is new work, rename the branch.")
+        emit(f"✓ KB · marked this session → \"{branch}\"\n"
+             f"⚠ A note already exists for this branch: {existing[0]}{more}. The sync will update it "
+             f"(not create a new one) — rename the branch if this is different work.")
     else:
-        emit(f"kb-mark -> {branch}")
+        emit(f"✓ KB · marked this session → \"{branch}\"\n"
+             f"The next sync captures this branch's work into your knowledge base.")
     return 0
 
 

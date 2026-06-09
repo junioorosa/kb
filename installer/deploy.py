@@ -32,6 +32,13 @@ ENGINE_TO_HOOKS = ["kb.py", "kb_config.py", "kb_retrieve.py"]
 ENGINE_TO_SCRIPTS = ["kb-sync.py", "kb-embed.py", "kb-embed-daemon.py"]
 
 
+def _is_test_file(name: str) -> bool:
+    """Test files live next to the adapter hooks for convenience but must never
+    deploy into a user's hooks dir (the host would not run them; they'd just be
+    clutter shipped to end users)."""
+    return name.endswith("_test.py") or name.endswith("_tests.py")
+
+
 def deploy_pairs(repo_root: Path, claude_dir: Path) -> list[tuple[Path, Path]]:
     """Return [(src, dst)] for every file to deploy. Auditable + explicit.
 
@@ -53,7 +60,7 @@ def deploy_pairs(repo_root: Path, claude_dir: Path) -> list[tuple[Path, Path]]:
     hooks_src = adapter / "hooks"
     if hooks_src.is_dir():
         for f in sorted(hooks_src.iterdir()):
-            if f.is_file():
+            if f.is_file() and not _is_test_file(f.name):
                 pairs.append((f, claude_dir / "hooks" / f.name))
     cmds_src = adapter / "commands"
     if cmds_src.is_dir():

@@ -72,7 +72,7 @@ def main() -> int:
         return 0
 
     if not session_id:
-        emit("kb-stats: session_id missing from payload")
+        emit("KB · /kb-stats couldn't run: no session id in the hook payload.")
         return 0
 
     sd = _state_dir()
@@ -81,8 +81,8 @@ def main() -> int:
     read_state = _load_json(os.path.join(sd, f"kb-bodyread-{session_id}.json"))
 
     if not tok_state:
-        emit("kb-stats: no KB injections recorded yet for this session.\n"
-             "Send a regular prompt that triggers retrieval, then run /kb-stats again.")
+        emit("KB · no stats yet for this session.\n"
+             "Send a prompt that triggers KB retrieval, then run /kb-stats again.")
         return 0
 
     total = int(tok_state.get("total", 0))
@@ -107,7 +107,7 @@ def main() -> int:
         hit_pct = 0
 
     lines = []
-    lines.append("## KB session stats")
+    lines.append("KB · session stats")
     lines.append(f"session : {session_id[:12]}...")
     lines.append(f"counter : {method}")
     lines.append("")
