@@ -378,9 +378,32 @@ async function loadSyncHistory() {
     (r.errors ? ` · <span class="bad-txt">${r.errors} error${r.errors > 1 ? "s" : ""}</span>` : "");
   const L = r.learned || {};
   const nl = (L.learnings || []).length, nt = (L.tickets || []).length;
-  det.textContent = (nl || nt)
+  const base = (nl || nt)
     ? `${nl} learning${nl !== 1 ? "s" : ""}, ${nt} ticket${nt !== 1 ? "s" : ""} this run`
     : `${runs.length} run${runs.length > 1 ? "s" : ""} on record`;
+  const dups = r.duplicates || [];
+  if (dups.length) {
+    if (dot.className.indexOf("bad") === -1) dot.className = "sync-dot warn";
+    const twins = dups.filter((d) => d.kind === "twin").length;
+    const top = dups.slice(0, 6).map((d) =>
+      `${d.kind === "twin" ? "twin " : ""}${d.score} · ${shortPair(d.a)} ⇄ ${shortPair(d.b)}`).join("\n");
+    const label = twins
+      ? `⚠ ${twins} same-run twin${twins > 1 ? "s" : ""}` +
+        (dups.length > twins ? ` (+${dups.length - twins} to review)` : "")
+      : `⚠ ${dups.length} possible duplicate${dups.length > 1 ? "s" : ""}`;
+    det.innerHTML = `${esc(base)} · <span class="warn-txt" title="${esc(top)}">${esc(label)}</span>`;
+  } else {
+    det.textContent = base;
+  }
+}
+
+function shortPair(rel) {
+  // ".../<folder>/Learnings/<name>.md" -> "<folder>/<name>"
+  const parts = (rel || "").split("/");
+  const name = (parts.pop() || "").replace(/\.md$/, "");
+  const i = parts.lastIndexOf("Learnings");
+  const folder = i > 0 ? parts[i - 1] : (parts.pop() || "");
+  return folder ? `${folder}/${name}` : name;
 }
 
 async function loadLearnings() {

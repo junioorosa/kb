@@ -171,6 +171,7 @@ input::placeholder { color: var(--text-faint); }
 .muted { color: var(--text-faint); font-size: 13px; }
 .muted.pad { padding: 20px; }
 .bad-txt { color: var(--red); }
+.warn-txt { color: var(--amber); cursor: help; }
 
 /* Sync strip */
 .sync-strip {

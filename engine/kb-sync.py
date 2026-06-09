@@ -1056,6 +1056,84 @@ def retrieve_for_branch(store, branch: str, project: str, commits: list, stat: s
         return [], []
 
 
+def dedup_scan(report, vault: Path, threshold: float = 0.80, max_pairs: int = 25) -> list[dict]:
+    """Flag learnings WRITTEN THIS RUN that overlap another learning — a same-run
+    sibling (the audit can't see files being created in its own pass) OR an existing
+    vault learning the capture-time retrieval failed to surface.
+
+    Detection only. It never merges or edits: a blind vault write is forbidden
+    (`escrita errada envenena consultas`) and merging is lossy — the unique delta on
+    the 'duplicate' side can be the thing worth keeping. The output is a report the
+    human reviews; the fix is theirs. The primary defense against twins is the capture
+    prompt's "one insight = one file" rule; this is the safety net behind it.
+
+    Mechanism: re-embed the vault (incremental — only this run's writes cost anything),
+    then for each touched learning retrieve its nearest neighbours by body and keep
+    pairs at/above `threshold` cosine where at least one side was written this run.
+    `_index.md` neighbours are skipped (a ticket summary legitimately overlaps its own
+    learnings — not a duplicate).
+
+    Threshold is recall-biased on purpose. Calibrated on a real vault: a same-run twin
+    (two learning files written for one fix) scored ~0.84; distinct same-topic siblings
+    topped out ~0.82; clearly-unrelated pairs sat <0.66. Cosine cannot fully separate
+    a twin from a distinct sibling (~0.01 apart), so for a REVIEW signal a false positive
+    (a glance) is cheaper than a false negative (a dup that persists) — hence 0.80, catching
+    the twin with margin and surfacing a few near-siblings for the human to dismiss.
+    Embedding-bound and fail-open: any embedding error returns [] (never blocks sync)."""
+    if kb_embed is None:
+        return []
+    touched = [p for p in report.changed_files(vault)
+               if "/Learnings/" in p.as_posix() and p.name != "_index.md"]
+    if not touched:
+        return []
+    touched_rels = {p.relative_to(vault).as_posix() for p in touched}
+    try:
+        store = kb_embed.VectorStore()
+        kb_embed.reindex_vault(vault, store, verbose=False)
+        seen = set()
+        out = []
+        for p in touched:
+            rel = p.relative_to(vault).as_posix()
+            body = kb_embed.read_md_body(vault, rel, max_chars=2000)
+            if not body.strip():
+                continue
+            hits = kb_embed.retrieve_top_k(body, k=6, kind={"md"}, store=store)
+            best: dict[str, float] = {}
+            for h in hits:
+                hp = (h.get("path") or "").replace("\\", "/")
+                if not hp or hp == rel or hp.endswith("_index.md"):
+                    continue
+                best[hp] = max(best.get(hp, 0.0), float(h.get("score", 0.0)))
+            for hp, s in best.items():
+                if s < threshold:
+                    continue
+                pair = tuple(sorted([rel, hp]))
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                a_new = pair[0] in touched_rels
+                b_new = pair[1] in touched_rels
+                # both sides written this run = a same-run twin: the exact case the
+                # capture audit is blind to (it can't see siblings born in its own
+                # pass). One side new = a cross-run near-miss retrieval didn't surface.
+                # Twins are the higher-confidence flag — the distinct-sibling noise at
+                # 0.80-0.82 is almost all cross-run, so this split lets the human triage.
+                out.append({
+                    "a": pair[0], "b": pair[1], "score": round(s, 3),
+                    "a_new": a_new, "b_new": b_new,
+                    "kind": "twin" if (a_new and b_new) else "review",
+                })
+        # twins first, then by score — surface the intra-run case the user flagged.
+        out.sort(key=lambda d: (d["kind"] != "twin", -d["score"]))
+        return out[:max_pairs]
+    except kb_embed.EmbeddingsUnavailable as e:
+        print(f"  [dedup] skipped (embeddings unavailable): {e}")
+        return []
+    except Exception as e:
+        print(f"  [dedup] error (non-fatal): {type(e).__name__}: {e}")
+        return []
+
+
 def format_session_hints_block(hints: list[dict]) -> str:
     if not hints:
         return ""
@@ -1178,6 +1256,13 @@ pr:
    decision the model wouldn't already say. Strip what a competent dev already knows (what
    the framework is, standard API usage). If nothing non-regenerable survives the strip,
    SKIP rather than create the file.
+
+   **One insight = one file — no twin learnings this run.** When this diff yields several
+   ADDS, audit them against EACH OTHER, not only the existing vault: if two candidates
+   restate the same delta, emit the single most general one and let `_index.md` cross-link
+   it — never write near-duplicate siblings. The existing-learnings view above does NOT
+   include files you are creating in this same run, so this dedupe is yours to enforce.
+   Prefer ADJUSTS on an existing file over a new near-duplicate.
 5. Update `{vault}/{folder}/_index.md` apparent_problem / tags / related_tickets based on commits + diff. **Always set `last_update: <YYYY-MM-DD today>`**. Keep `branch: {branch}` intact — it is the match key. Do NOT set status=resolved here — only the finalize routine does that. Use English frontmatter keys: project, type, module, slug, title, opened, resolved, last_update, apparent_problem, actual_solution, related_tickets, branch, pr. Status enum: open|in-progress|resolved|discarded. Scope enum: ticket|project|workspace.
 6. Report briefly: created/updated file paths, CONFIRMS/REFUTES/ADJUSTS/ADDS counts and names.
 
@@ -1256,6 +1341,7 @@ class RunReport:
         self.finalizes: list[dict] = []
         self.errors: list[dict] = []
         self.fetch_failures: list[dict] = []
+        self.duplicates: list[dict] = []
         self.repos_discovered = 0
         self.repos_fetched = 0
 
@@ -1368,6 +1454,7 @@ class RunReport:
             "touched": touched,
             "learned_files": learned,
             "learned": learned_split,
+            "duplicates": self.duplicates,
         }
 
     def write_html(self, vault: Path, out_path: Path):
@@ -1890,6 +1977,20 @@ def main():
             save_run_state(state)
             print(f"  last_examined_at -> {today} for {len(sealed)} origin(s); "
                   f"{len(incomplete_origins)} held back (errors/deferrals/stale fetch)")
+
+    # Flag duplicate learnings touched this run (same-run twins the capture audit
+    # can't see, or existing siblings retrieval missed). Detect + report only — the
+    # merge decision is the human's (auto-merge would be a blind, lossy vault write).
+    # Lands in the sync-history record below and the manager's sync-health strip.
+    if not args.dry_run:
+        report.duplicates = dedup_scan(report, vault)
+        if report.duplicates:
+            twins = sum(1 for d in report.duplicates if d.get("kind") == "twin")
+            print(f"\n  [dedup] {len(report.duplicates)} possible duplicate learning pair(s) "
+                  f"({twins} same-run twin) — review:")
+            for d in report.duplicates:
+                tag = "TWIN  " if d.get("kind") == "twin" else "review"
+                print(f"    {tag} {d['score']:.3f}  {d['a']}  <->  {d['b']}")
 
     # Record this run for the manager's sync-history view (real runs only).
     if not args.dry_run:
