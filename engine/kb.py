@@ -6,7 +6,7 @@ the resolved config so install/setup can verify a machine); retrieve/sync/stats
 are stubs that later phases wire to the existing scripts.
 
 Lives next to the hook for now so it can import kb_config as a sibling; the
-target home is engine/ once the repo is carved out (see KB-ARCHITECTURE.md).
+target home is engine/ once the repo is carved out.
 """
 from __future__ import annotations
 

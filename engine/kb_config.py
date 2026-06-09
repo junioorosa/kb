@@ -10,12 +10,12 @@ Resolution order (current):
   2. ~/.claude/kb-workspaces.json  ("vault" key)   [legacy/transitional location]
   3. unresolved -> None
 
-CONTRACT (load-bearing — see KB-ARCHITECTURE.md):
+CONTRACT (load-bearing):
   - Hook hot-path calls resolve_vault(strict=False): unresolved returns None,
     the caller degrades (emits nothing) and NEVER raises into the prompt flow.
   - CLI / setup calls resolve_vault(strict=True): unresolved raises
     KBConfigError loudly. No "best guess" fallback — guessing the vault poisons
-    retrieval (see the "ponto sensível" rule). Degrade != guess.
+    retrieval — the one failure mode KB must never have. Degrade != guess.
 
 The vendor-neutral target location (~/.kb/config.json) is intentionally NOT read
 yet — its schema is undesigned. Adding it to the chain later is non-breaking.

@@ -2013,8 +2013,8 @@ def main():
         print(f"\nreport: {report_path}")
 
     # Version the vault locally (commit-only-if-changes; never pushes). The KB is
-    # a local-only repo by design — see KB-ARCHITECTURE.md (vault isolated from
-    # every remote). This is what makes the scheduled run also snapshot history.
+    # a local-only repo by design — the vault is isolated from every remote.
+    # This is what makes the scheduled run also snapshot history.
     if not args.dry_run:
         commit_vault(vault)
 
