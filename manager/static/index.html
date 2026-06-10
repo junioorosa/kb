@@ -56,7 +56,10 @@
         <p class="card-sub">Where your knowledge lives. Must be an existing folder.</p>
         <label class="field">
           <span>Vault path</span>
-          <input type="text" id="vault-input" placeholder="C:/Users/you/.kb/vault" spellcheck="false" />
+          <span class="field-browse">
+            <input type="text" id="vault-input" placeholder="C:/Users/you/.kb/vault" spellcheck="false" />
+            <button class="btn btn-ghost" id="vault-browse" title="Pick a folder">Browse…</button>
+          </span>
         </label>
         <div class="row">
           <button class="btn btn-primary" id="save-vault">Save vault</button>
@@ -176,6 +179,25 @@
     </footer>
   </div>
   <div id="toast" class="toast"></div>
+
+  <!-- Folder picker (server-side listing: the browser alone can't hand over absolute paths) -->
+  <div id="fs-modal" class="fs-modal hidden">
+    <div class="fs-dialog">
+      <div class="fs-head">
+        <span>Choose a folder</span>
+        <button class="fs-close" id="fs-close" title="Close">×</button>
+      </div>
+      <div class="fs-path" id="fs-path">—</div>
+      <div class="fs-list" id="fs-list"></div>
+      <div class="fs-actions">
+        <button class="btn btn-ghost" id="fs-up">↑ Up</button>
+        <button class="btn btn-ghost" id="fs-home">Home</button>
+        <button class="btn btn-ghost" id="fs-new">New folder…</button>
+        <span class="fs-spacer"></span>
+        <button class="btn btn-primary" id="fs-select">Select this folder</button>
+      </div>
+    </div>
+  </div>
   <script src="/static/app.js"></script>
   <!-- "Core" explainer view: self-injecting drop-in (adds its own tab + panel). -->
   <script defer src="/static/core.js"></script>

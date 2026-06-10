@@ -55,6 +55,66 @@ CTYPES = {".html": "text/html; charset=utf-8", ".css": "text/css",
           ".js": "application/javascript", ".svg": "image/svg+xml"}
 
 
+# --- Filesystem browse (folder picker) ----------------------------------------
+# The manager runs ON the user's machine, so it can offer a real folder picker
+# where a plain browser can't (file inputs never expose absolute paths).
+# Directories only — names, never file contents — plus an explicit mkdir for
+# "create the vault right here". Token-gated like every other API route.
+
+def fs_list(path_str) -> dict:
+    """List the sub-DIRECTORIES of a path (default: home). Per-child permission
+    errors skip the child; an unreadable path itself reports an error."""
+    try:
+        p = Path(path_str).expanduser() if path_str else Path.home()
+        p = p.resolve()
+    except (OSError, ValueError) as e:
+        return {"error": f"bad path: {e}"}
+    if not p.is_dir():
+        return {"error": f"not a directory: {p}"}
+    dirs = []
+    try:
+        for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
+            try:
+                if child.is_dir():
+                    dirs.append(child.name)
+            except OSError:
+                continue
+    except OSError as e:
+        return {"error": f"cannot list {p}: {e}"}
+    if os.name == "nt":
+        try:
+            roots = os.listdrives()  # Python 3.12+
+        except AttributeError:  # pragma: no cover - older Python
+            roots = [f"{Path.home().drive}\\"]
+    else:
+        roots = ["/"]
+    parent = str(p.parent) if p.parent != p else None
+    return {"path": str(p), "parent": parent, "dirs": dirs,
+            "home": str(Path.home()), "sep": os.sep, "roots": roots}
+
+
+def fs_mkdir(parent: str, name: str) -> dict:
+    """Create ONE new directory inside an existing one. The name must be a single
+    path segment — separators / traversal are refused, never normalized away."""
+    name = (name or "").strip()
+    if not name or name in (".", "..") or any(c in name for c in '/\\<>:"|?*'):
+        return {"error": "invalid folder name"}
+    try:
+        base = Path(parent).expanduser().resolve()
+    except (OSError, ValueError) as e:
+        return {"error": f"bad parent: {e}"}
+    if not base.is_dir():
+        return {"error": f"parent is not a directory: {base}"}
+    target = base / name
+    if target.exists():
+        return {"error": f"already exists: {target}"}
+    try:
+        target.mkdir()
+    except OSError as e:
+        return {"error": f"mkdir failed: {e}"}
+    return {"created": str(target)}
+
+
 def daemon_ping() -> dict:
     """Probe the embedding daemon with the same {"op":"ping"} the statusline uses."""
     lock = install.kb_dir() / "state" / "kb-embed-daemon.lock"
@@ -175,6 +235,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "bad token"})
         if path == "/api/status":
             return self._send(200, self._status())
+        if path == "/api/fs":
+            q = parse_qs(urlparse(self.path).query)
+            out = fs_list((q.get("path") or [None])[0])
+            return self._send(400 if "error" in out else 200, out)
         if path == "/api/config":
             return self._send(200, {"config": kb_config.load_config(), "path": str(kb_config.workspaces_path())})
         if path == "/api/sync-history":
@@ -244,6 +308,9 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json()
         if body is None:
             return self._send(400, {"error": "bad json"})
+        if path == "/api/fs/mkdir":
+            out = fs_mkdir(str(body.get("parent") or ""), str(body.get("name") or ""))
+            return self._send(400 if "error" in out else 200, out)
         if path == "/api/schedule":
             t = str(body.get("time", scheduler.DEFAULT_TIME))
             if not _HHMM.match(t):

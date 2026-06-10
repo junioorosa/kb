@@ -235,6 +235,7 @@ function renderWorkspaces() {
     row.innerHTML =
       `<input type="text" placeholder="name" value="${escapeAttr(w.name)}" data-i="${i}" data-k="name" spellcheck="false" />` +
       `<input type="text" placeholder="C:/path/to/repos" value="${escapeAttr(w.path)}" data-i="${i}" data-k="path" spellcheck="false" />` +
+      `<button class="ws-browse" data-browse="${i}" title="pick a folder">📁</button>` +
       `<button class="ws-del" data-del="${i}" title="remove">×</button>`;
     list.appendChild(row);
   });
@@ -246,6 +247,12 @@ function renderWorkspaces() {
   });
   list.querySelectorAll(".ws-del").forEach((b) => {
     b.addEventListener("click", () => { WORKSPACES.splice(+b.dataset.del, 1); renderWorkspaces(); });
+  });
+  list.querySelectorAll(".ws-browse").forEach((b) => {
+    b.addEventListener("click", () => {
+      const i = +b.dataset.browse;
+      openFolderPicker(WORKSPACES[i].path, (p) => { WORKSPACES[i].path = p; renderWorkspaces(); });
+    });
   });
 }
 
@@ -478,10 +485,87 @@ async function openItem(rel) {
 
 let _searchTimer = null;
 
+// --- Folder picker ----------------------------------------------------------
+// The browser can't hand absolute paths to a web page, but this server runs ON
+// the user's machine — so it lists directories (/api/fs) and the page renders a
+// picker. Select fills the target input; "New folder…" covers the first-run
+// "create ~/.kb/vault right here" case.
+const FS = { path: null, parent: null, onSelect: null };
+
+async function fsLoad(path) {
+  let r;
+  try { r = await api("GET", "/api/fs" + (path ? "?path=" + encodeURIComponent(path) : "")); }
+  catch (e) { toast("browse: " + e.message, "err"); return false; }
+  FS.path = r.path;
+  FS.parent = r.parent;
+  $("fs-path").textContent = r.path;
+  $("fs-up").disabled = !r.parent;
+  const list = $("fs-list");
+  list.innerHTML = "";
+  if (r.roots && r.roots.length > 1) {
+    const row = document.createElement("div");
+    row.className = "fs-roots";
+    r.roots.forEach((root) => {
+      const b = document.createElement("button");
+      b.textContent = root;
+      b.addEventListener("click", () => fsLoad(root));
+      row.appendChild(b);
+    });
+    list.appendChild(row);
+  }
+  if (r.dirs.length === 0) {
+    list.insertAdjacentHTML("beforeend", '<div class="fs-empty">No subfolders.</div>');
+  }
+  r.dirs.forEach((name) => {
+    const b = document.createElement("button");
+    b.className = "fs-dir";
+    b.innerHTML = "📁 " + esc(name);
+    b.addEventListener("click", () => fsLoad(r.path + (r.path.endsWith(r.sep) ? "" : r.sep) + name));
+    list.appendChild(b);
+  });
+  return true;
+}
+
+async function openFolderPicker(startPath, onSelect) {
+  FS.onSelect = onSelect;
+  $("fs-modal").classList.remove("hidden");
+  const ok = await fsLoad((startPath || "").trim() || null);
+  if (!ok) fsLoad(null);  // a typed-but-broken start path falls back to home
+}
+
+function closeFolderPicker() {
+  $("fs-modal").classList.add("hidden");
+  FS.onSelect = null;
+}
+
+async function fsNewFolder() {
+  const name = prompt("New folder name (inside " + FS.path + "):");
+  if (!name) return;
+  try {
+    const r = await api("POST", "/api/fs/mkdir", { parent: FS.path, name });
+    toast("created " + r.created, "ok");
+    fsLoad(FS.path);
+  } catch (e) { toast("mkdir: " + e.message, "err"); }
+}
+
 // --- Wire up --------------------------------------------------------------
 function init() {
   if (!TOKEN) { toast("missing token — relaunch from the server URL", "err"); }
   $("save-vault").addEventListener("click", saveVault);
+  $("vault-browse").addEventListener("click", () =>
+    openFolderPicker($("vault-input").value, (p) => { $("vault-input").value = p; }));
+  $("fs-close").addEventListener("click", closeFolderPicker);
+  $("fs-up").addEventListener("click", () => { if (FS.parent) fsLoad(FS.parent); });
+  $("fs-home").addEventListener("click", () => fsLoad(null));
+  $("fs-new").addEventListener("click", fsNewFolder);
+  $("fs-select").addEventListener("click", () => {
+    if (FS.onSelect && FS.path) FS.onSelect(FS.path);
+    closeFolderPicker();
+  });
+  $("fs-modal").addEventListener("click", (e) => { if (e.target === $("fs-modal")) closeFolderPicker(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("fs-modal").classList.contains("hidden")) closeFolderPicker();
+  });
   $("add-ws").addEventListener("click", () => { WORKSPACES.push({ name: "", path: "" }); renderWorkspaces(); });
   $("save-ws").addEventListener("click", saveWorkspaces);
   $("save-sched").addEventListener("click", saveSchedule);
