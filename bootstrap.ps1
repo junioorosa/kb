@@ -2,12 +2,6 @@
 #
 #   irm https://raw.githubusercontent.com/junioorosa/kb/main/bootstrap.ps1 | iex
 #
-# Raw URLs only serve public repos. While the repo is private, collaborators
-# install with gh (it carries their auth):
-#
-#   gh repo clone junioorosa/kb "$env:USERPROFILE\.kb\app"
-#   powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.kb\app\installer\install.ps1" -Apply
-#
 # Re-running is always safe: the clone is updated (ff-only) and the installer
 # is idempotent (diffs first, backs up what it overwrites).
 #
@@ -35,15 +29,15 @@ if (Test-Path (Join-Path $appDir ".git")) {
     }
     git clone --quiet $repoUrl $appDir 2>$null
     if ($LASTEXITCODE -ne 0) {
-        # A plain https clone of a private repo fails without credentials; gh
-        # carries the collaborator's auth, so retry through it before giving up.
+        # A plain https clone of a private fork fails without credentials; gh
+        # carries the user's auth, so retry through it before giving up.
         if (Get-Command gh -ErrorAction SilentlyContinue) {
-            Write-Host "bootstrap: plain clone failed (private repo?) - retrying via gh"
+            Write-Host "bootstrap: plain clone failed - retrying via gh"
             $slug = $repoUrl -replace "^git@github\.com:", "" -replace "^https://github\.com/", "" -replace "\.git$", ""
             gh repo clone $slug $appDir
             if ($LASTEXITCODE -ne 0) { throw "bootstrap: gh clone failed for $slug" }
         } else {
-            throw "bootstrap: clone failed. Private repo? Run 'gh auth login' and retry, or set KB_REPO."
+            throw "bootstrap: clone failed. Check the URL (KB_REPO) and your network; a private fork needs 'gh auth login'."
         }
     }
 }

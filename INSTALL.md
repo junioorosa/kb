@@ -23,11 +23,8 @@ Check, and fix only what's missing:
 ## 1. Get the repo
 
 ```bash
-# fresh machine (public repo)
+# fresh machine
 git clone https://github.com/junioorosa/kb.git ~/.kb/app
-
-# private clone/fork: gh carries the user's auth
-gh repo clone junioorosa/kb ~/.kb/app
 
 # already cloned (any path works — ~/.kb/app is just the convention)
 git -C ~/.kb/app pull --ff-only

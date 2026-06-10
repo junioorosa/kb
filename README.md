@@ -60,11 +60,6 @@ curl -fsSL https://raw.githubusercontent.com/junioorosa/kb/main/bootstrap.sh | b
 irm https://raw.githubusercontent.com/junioorosa/kb/main/bootstrap.ps1 | iex
 ```
 
-> Installing from a **private** clone or fork? Raw URLs won't serve it — use `gh` (it carries
-> your GitHub auth): `gh repo clone <owner>/kb ~/.kb/app`, then `bash ~/.kb/app/bootstrap.sh`
-> (it detects the existing clone, updates it, and runs the installer). The script also falls
-> back to `gh` on its own when a plain clone of a private `KB_REPO` is rejected.
-
 **Agent-driven.** Already in an AI coding tool? Just say: *"Read INSTALL.md and install KB for
 me."* [`INSTALL.md`](INSTALL.md) is a runbook written for agents — prerequisites, install,
 verification, and **repair** when an install breaks.

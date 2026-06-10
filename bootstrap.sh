@@ -3,11 +3,6 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/junioorosa/kb/main/bootstrap.sh | bash
 #
-# Raw URLs only serve public repos. While the repo is private, collaborators
-# install with gh (it carries their auth):
-#
-#   gh repo clone junioorosa/kb "$HOME/.kb/app" && bash "$HOME/.kb/app/installer/install.sh" --apply
-#
 # Re-running is always safe: the clone is updated (ff-only) and the installer
 # is idempotent (diffs first, backs up what it overwrites).
 #
@@ -30,14 +25,14 @@ else
   echo "bootstrap: cloning $REPO_URL -> $APP_DIR"
   mkdir -p "$(dirname "$APP_DIR")"
   if ! git clone --quiet "$REPO_URL" "$APP_DIR" 2>/dev/null; then
-    # A plain https clone of a private repo fails without credentials; gh
-    # carries the collaborator's auth, so retry through it before giving up.
+    # A plain https clone of a private fork fails without credentials; gh
+    # carries the user's auth, so retry through it before giving up.
     if command -v gh >/dev/null 2>&1; then
-      echo "bootstrap: plain clone failed (private repo?) — retrying via gh"
+      echo "bootstrap: plain clone failed — retrying via gh"
       slug=$(printf '%s' "$REPO_URL" | sed -E 's#(git@github\.com:|https://github\.com/)##; s#\.git$##')
       gh repo clone "$slug" "$APP_DIR"
     else
-      echo "bootstrap: clone failed. Private repo? Run 'gh auth login' and retry, or set KB_REPO." >&2
+      echo "bootstrap: clone failed. Check the URL (KB_REPO) and your network; a private fork needs 'gh auth login'." >&2
       exit 1
     fi
   fi
