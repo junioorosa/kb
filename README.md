@@ -48,9 +48,25 @@ The learning came from your own session — captured automatically the night you
 
 ## Install
 
-Clone the repo, then run the installer. It is idempotent: the same command does first-install
-and updates, and re-running is always safe (it diffs, backs up every file it overwrites, and
-never deletes files it doesn't own).
+**One line.** Clones to `~/.kb/app` and runs the installer; re-run the same line to update.
+
+```bash
+# macOS / Linux / WSL / Git Bash
+curl -fsSL https://raw.githubusercontent.com/junioorosa/kb/main/bootstrap.sh | bash
+
+# Windows (PowerShell 5.1+)
+irm https://raw.githubusercontent.com/junioorosa/kb/main/bootstrap.ps1 | iex
+```
+
+> Raw URLs only serve **public** repos — while this repo is private the one-liner has nothing
+> to fetch. Collaborators install with `gh` instead (it carries their GitHub auth):
+> `gh repo clone junioorosa/kb ~/.kb/app`, then `bash ~/.kb/app/bootstrap.sh` (it detects the
+> existing clone, updates it, and runs the installer). The script also falls back to `gh` on
+> its own when a plain clone of a private `KB_REPO` is rejected.
+
+Already have a clone? The installer alone is enough — it is idempotent: the same command does
+first-install and updates, and re-running is always safe (it diffs, backs up every file it
+overwrites, and never deletes files it doesn't own).
 
 **Easiest — double-click** (installs/updates KB **and** opens the manager to configure it):
 
