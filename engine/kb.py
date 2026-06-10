@@ -17,12 +17,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kb_config import resolve_vault, workspaces_path, load_config, KBConfigError
+from kb_config import resolve_vault, workspaces_path, load_config, kb_home, state_dir, KBConfigError
 
 
 def cmd_doctor(args) -> int:
     print("kb doctor")
-    print(f"  workspaces file : {workspaces_path()}")
+    print(f"  kb home         : {kb_home()}")
+    print(f"  config file     : {workspaces_path()}")
     cfg = load_config()
     ws = cfg.get("workspaces") or []
     print(f"  workspaces      : {len(ws)}")
@@ -61,25 +62,20 @@ def cmd_retrieve(args) -> int:
     return 0
 
 
-def _claude_dir() -> Path:
-    env = os.environ.get("CLAUDE_CONFIG_DIR")
-    if env and env.strip():
-        return Path(env.strip())
-    return workspaces_path().parent  # ~/.claude
-
-
 def _resolve_manager() -> Path | None:
     """Find the manager's server.py whether `kb` runs from the repo (engine/
-    sibling manager/) or deployed to ~/.claude/hooks (read the install-recorded
-    `.kb-source` to find the clone). Returns the path, or None if not found.
+    sibling manager/) or deployed to <kb home>/engine (read the install-recorded
+    `.source` stamp to find the clone). Returns the path, or None if not found.
     """
     here = Path(__file__).resolve().parent
     candidates = [here.parent / "manager" / "server.py"]
-    src_file = _claude_dir() / ".kb-source"
-    if src_file.exists():
-        src = src_file.read_text(encoding="utf-8").strip()
-        if src:
-            candidates.append(Path(src) / "manager" / "server.py")
+    # Current stamp, then the pre-0.11 location an un-migrated install still has.
+    for src_file in (kb_home() / ".source",
+                     Path(os.path.expanduser("~")) / ".claude" / ".kb-source"):
+        if src_file.exists():
+            src = src_file.read_text(encoding="utf-8").strip()
+            if src:
+                candidates.append(Path(src) / "manager" / "server.py")
     return next((c for c in candidates if c.exists()), None)
 
 
@@ -129,8 +125,8 @@ def cmd_mark(args) -> int:
               "  kb mark --done [branch]          close on the next sync (status: resolved)\n"
               "  kb mark --experimental [branch]  down-weight in retrieval", file=sys.stderr)
         return 2
-    state_dir = _claude_dir() / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
+    sdir = state_dir()
+    sdir.mkdir(parents=True, exist_ok=True)
     sid = f"cli-{int(_time.time())}"
     data = {
         "session_id": sid,
@@ -144,7 +140,7 @@ def cmd_mark(args) -> int:
         data["done_at"] = data["marked_at"]
     if args.experimental:
         data["mark_experimental"] = True
-    path = state_dir / f"kb-session-branch-{sid}.json"
+    path = sdir / f"kb-session-branch-{sid}.json"
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     what = "done -> resolved on the next sync" if args.done else "experimental (retrieval down-weight)"
     print(f"kb mark: \"{branch}\" marked {what}.")

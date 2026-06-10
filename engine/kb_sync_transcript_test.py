@@ -228,17 +228,20 @@ def main() -> int:
         print("test_e2e_mark_tool_to_hints")
         wire(tmp, [store])
         os.environ["KB_VAULT"] = str(tmp / "vault")
+        # kb_config.state_dir() resolves KB_HOME at call time — point the REAL
+        # tool at the sandbox or its sidecar lands in the live ~/.kb/state.
+        os.environ["KB_HOME"] = str(tmp / ".kb")
         (tmp / "vault").mkdir(exist_ok=True)
         sys.path.insert(0, str(HERE))
         import kb_mcp  # noqa: E402
-        kb_mcp.kbr.HOME = tmp  # sidecars under the sandbox, not the real HOME
+        kb_mcp.kbr.HOME = tmp  # legacy anchor, kept for the pre-0.11 code path
         out = kb_mcp.tool_kb_mark({"branch": "feat/e2e", "cwd": str(tmp)})
         tok_line = next((ln for ln in out.splitlines() if "KB-MARK:" in ln), "")
         e2e_token = tok_line.split("Mark token:")[-1].strip()
         check("tool returned a parseable token", e2e_token.startswith("KB-MARK:feat/e2e:"), out[:120])
         # the host would persist the tool RESULT — simulate that verbatim
         write_rollout(store, "rollout-e2e.jsonl", [rollout_line(out)])
-        kb.STATE_DIR = tmp / ".claude" / "state"   # where the tool wrote (HOME=tmp)
+        kb.STATE_DIR = tmp / ".kb" / "state"   # where the tool wrote (HOME=tmp)
         sessions = kb.find_sessions_for_branch("feat/e2e")
         check("sync finds the session marked by the real tool output",
               len(sessions) == 1 and sessions[0]["jsonl_path"] is not None)

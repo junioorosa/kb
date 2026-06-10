@@ -56,17 +56,28 @@ def _count_tokens(text: str):
     return (max(1, nbytes // 4), False)
 
 
+def _kb_home() -> str:
+    return os.environ.get("KB_HOME") or os.path.join(os.path.expanduser("~"), ".kb")
+
+
+def _config_path():
+    canonical = os.path.join(_kb_home(), "config.json")
+    if os.path.exists(canonical):
+        return canonical
+    legacy = os.path.join(os.path.expanduser("~"), ".claude", "kb-workspaces.json")
+    return legacy if os.path.exists(legacy) else canonical
+
+
 def _vault_root():
     try:
-        cfg = os.path.join(os.path.expanduser("~"), ".claude", "kb-workspaces.json")
-        with open(cfg, "r", encoding="utf-8") as f:
+        with open(_config_path(), "r", encoding="utf-8") as f:
             return json.load(f).get("vault")
     except Exception:
         return os.environ.get("KB_VAULT")
 
 
 def _state_dir() -> str:
-    d = os.path.join(os.path.expanduser("~"), ".claude", "state")
+    d = os.path.join(_kb_home(), "state")
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -144,7 +155,9 @@ def _response_text(resp) -> str:
 def main() -> int:
     if os.environ.get("KB_HOOKS_DISABLED") == "1":
         return 0
-    if os.path.isfile(os.path.expanduser("~/.claude/kb-hooks-disabled")):
+    if os.path.isfile(os.path.join(_kb_home(), "hooks-disabled")):
+        return 0
+    if os.path.isfile(os.path.expanduser("~/.claude/kb-hooks-disabled")):  # legacy
         return 0
     try:
         payload = json.load(sys.stdin)

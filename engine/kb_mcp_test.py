@@ -207,7 +207,7 @@ def main() -> int:
         mktext = tool_text(mkres)
         check("kb_mark not an error", not (mkres.get("result") or {}).get("isError"), mktext[:120])
         check("result carries a KB-MARK token", "KB-MARK:feat/from-codex:" in mktext)
-        mcp_sidecars = list((home / ".claude" / "state").glob("kb-session-branch-mcp-*.json"))
+        mcp_sidecars = list((home / ".kb" / "state").glob("kb-session-branch-mcp-*.json"))
         check("writes one mcp sidecar", len(mcp_sidecars) == 1)
         mdata = json.loads(mcp_sidecars[0].read_text(encoding="utf-8")) if mcp_sidecars else {}
         check("sidecar token matches the returned token",
@@ -225,7 +225,7 @@ def main() -> int:
         mk = subprocess.run([sys.executable, str(KB_CLI), "mark", "--done", "feat/from-codex"],
                             capture_output=True, text=True, env=env, timeout=30)
         check("kb mark --done exits 0", mk.returncode == 0, mk.stderr[:200])
-        sidecars = list((home / ".claude" / "state").glob("kb-session-branch-cli-*.json"))
+        sidecars = list((home / ".kb" / "state").glob("kb-session-branch-cli-*.json"))
         check("writes one cli sidecar", len(sidecars) == 1)
         data = json.loads(sidecars[0].read_text(encoding="utf-8")) if sidecars else {}
         check("sidecar carries branch + manual_done",

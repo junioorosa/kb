@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Deploy the KB engine + adapters from the repo into the live layout (~/.claude).
+"""Deploy the KB engine + adapters from the repo into the live layout.
 
-~/.claude is the engine's CURRENT data dir (a historical artifact, not a
-dependency on Claude Code): the MCP server, the manager and the nightly sync
-all run from it regardless of which host talks to the KB. Relocating to a
-neutral ~/.kb/ home is a planned, separate migration.
+Two targets, one manifest:
+  * <kb home>/engine/   — the whole engine plus the host-adapter hook scripts,
+    FLAT (kb-context.sh resolves $KB/engine/kb.py; kb-sync imports kb_config as
+    a sibling). ~/.kb by default, KB_HOME to override.
+  * <claude dir>/commands/ — the Claude Code slash commands; that location is
+    the one thing Claude Code itself dictates.
 
 Topology A: the repo is the source of truth; this step copies files into the
 live host layout. It is the spine of both first-install and "update certinho".
@@ -13,28 +15,24 @@ Care taken (the host may hold a *working* setup we must not silently break):
   * content-hash diff BEFORE any write — reports new / changed / eol-only / same;
   * EOL-aware — a pure CRLF<->LF difference is NOT real divergence and is left
     alone by default (don't churn a working .sh over line endings);
-  * backs up every file it overwrites into ~/.claude/.kb-backups/deploy-<ts>/,
+  * backs up every file it overwrites into <kb home>/backups/deploy-<ts>/,
     with a restore manifest, so a bad deploy is one `--rollback` away;
-  * copy-only — never deletes host files it doesn't own.
-
-The live layout is deliberately the proven, scattered one (engine split between
-hooks/ and scripts/ because kb-context.sh resolves $HOME/.claude/hooks/kb.py and
-kb-sync.py imports ../hooks/kb_config.py). Consolidation into ~/.claude/kb/ is a
-future cleanup, not this step.
+  * copy-only — never deletes host files it doesn't own. (Retiring a pre-0.11
+    ~/.claude engine is the migrate step's job, not deploy's.)
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 # --- Manifest ----------------------------------------------------------------
-# Engine splits across two host dirs (load-bearing — see module docstring).
-ENGINE_TO_HOOKS = ["kb.py", "kb_config.py", "kb_retrieve.py", "kb_mcp.py"]
-ENGINE_TO_SCRIPTS = ["kb-sync.py", "kb-embed.py", "kb-embed-daemon.py"]
+ENGINE_FILES = ["kb.py", "kb_config.py", "kb_retrieve.py", "kb_mcp.py",
+                "kb-sync.py", "kb-embed.py", "kb-embed-daemon.py"]
 
 
 def _is_test_file(name: str) -> bool:
@@ -44,29 +42,30 @@ def _is_test_file(name: str) -> bool:
     return name.endswith("_test.py") or name.endswith("_tests.py")
 
 
-def deploy_pairs(repo_root: Path, claude_dir: Path) -> list[tuple[Path, Path]]:
+def deploy_pairs(repo_root: Path, kb_dir: Path, claude_dir: Path) -> list[tuple[Path, Path]]:
     """Return [(src, dst)] for every file to deploy. Auditable + explicit.
 
-    Engine files are mapped explicitly (the hooks/scripts split matters). Adapter
-    hooks and commands are taken wholesale from their repo dirs (our controlled
-    source) so adding an adapter file to the repo includes it automatically.
+    Engine + adapter hook scripts land flat in <kb home>/engine. Slash commands
+    are the only Claude-Code-dictated location (claude_dir/commands). Adapter
+    files are taken wholesale from their repo dirs (our controlled source) so
+    adding one to the repo includes it automatically.
     """
     repo_root = Path(repo_root)
+    kb_dir = Path(kb_dir)
     claude_dir = Path(claude_dir)
+    engine_dir = kb_dir / "engine"
     pairs: list[tuple[Path, Path]] = []
 
     eng = repo_root / "engine"
-    for name in ENGINE_TO_HOOKS:
-        pairs.append((eng / name, claude_dir / "hooks" / name))
-    for name in ENGINE_TO_SCRIPTS:
-        pairs.append((eng / name, claude_dir / "scripts" / name))
+    for name in ENGINE_FILES:
+        pairs.append((eng / name, engine_dir / name))
 
     adapter = repo_root / "adapters" / "claude-code"
     hooks_src = adapter / "hooks"
     if hooks_src.is_dir():
         for f in sorted(hooks_src.iterdir()):
             if f.is_file() and not _is_test_file(f.name):
-                pairs.append((f, claude_dir / "hooks" / f.name))
+                pairs.append((f, engine_dir / f.name))
     cmds_src = adapter / "commands"
     if cmds_src.is_dir():
         for f in sorted(cmds_src.glob("*.md")):
@@ -100,9 +99,9 @@ def classify(src: Path, dst: Path) -> str:
     return "changed"
 
 
-def diff(repo_root: Path, claude_dir: Path) -> dict:
+def diff(repo_root: Path, kb_dir: Path, claude_dir: Path) -> dict:
     """Classify every manifest pair. No writes."""
-    pairs = deploy_pairs(repo_root, claude_dir)
+    pairs = deploy_pairs(repo_root, kb_dir, claude_dir)
     buckets: dict[str, list[str]] = {k: [] for k in ("new", "changed", "eol-only", "same", "missing-src")}
     for src, dst in pairs:
         buckets[classify(src, dst)].append(str(dst))
@@ -111,16 +110,18 @@ def diff(repo_root: Path, claude_dir: Path) -> dict:
 
 # --- Apply -------------------------------------------------------------------
 
-def apply(repo_root: Path, claude_dir: Path, normalize_eol: bool = False, dry_run: bool = False) -> dict:
+def apply(repo_root: Path, kb_dir: Path, claude_dir: Path,
+          normalize_eol: bool = False, dry_run: bool = False) -> dict:
     """Deploy. Copies `new` + `changed` (and `eol-only` only if normalize_eol).
 
-    Backs up every overwritten target into ~/.claude/.kb-backups/deploy-<ts>/
-    mirroring the path relative to claude_dir, plus a restore.json manifest.
-    Returns a report.
+    Backs up every overwritten target into <kb home>/backups/deploy-<ts>/
+    (mirrored under kb/ or claude/ by which root holds it), plus a restore.json
+    manifest. Returns a report.
     """
     repo_root = Path(repo_root)
+    kb_dir = Path(kb_dir)
     claude_dir = Path(claude_dir)
-    pairs = deploy_pairs(repo_root, claude_dir)
+    pairs = deploy_pairs(repo_root, kb_dir, claude_dir)
 
     to_write: list[tuple[Path, Path, str]] = []
     missing: list[str] = []
@@ -148,12 +149,15 @@ def apply(repo_root: Path, claude_dir: Path, normalize_eol: bool = False, dry_ru
         return report
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_dir = claude_dir / ".kb-backups" / f"deploy-{ts}"
+    backup_dir = kb_dir / "backups" / f"deploy-{ts}"
     restored: list[dict] = []
 
     for src, dst, state in to_write:
         if dst.exists():  # only 'changed'/'eol-only' have an existing target to save
-            rel = dst.relative_to(claude_dir)
+            try:
+                rel = Path("kb") / dst.relative_to(kb_dir)
+            except ValueError:
+                rel = Path("claude") / dst.relative_to(claude_dir)
             bpath = backup_dir / rel
             bpath.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(dst, bpath)
@@ -171,10 +175,15 @@ def apply(repo_root: Path, claude_dir: Path, normalize_eol: bool = False, dry_ru
     return report
 
 
-def rollback(claude_dir: Path, backup_dir: Path | None = None) -> dict:
-    """Restore files from a deploy backup. Defaults to the most recent one."""
-    claude_dir = Path(claude_dir)
-    root = claude_dir / ".kb-backups"
+def rollback(kb_dir: Path, backup_dir: Path | None = None) -> dict:
+    """Restore files from a deploy backup. Defaults to the most recent one.
+    Also sees pre-0.11 backups left under ~/.claude/.kb-backups."""
+    kb_dir = Path(kb_dir)
+    root = kb_dir / "backups"
+    if not root.is_dir():
+        legacy = Path(os.path.expanduser("~")) / ".claude" / ".kb-backups"
+        if legacy.is_dir():
+            root = legacy
     if backup_dir is None:
         candidates = sorted(root.glob("deploy-*"), reverse=True) if root.is_dir() else []
         if not candidates:
@@ -199,7 +208,8 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="Deploy KB engine + adapter into the host.")
-    ap.add_argument("--repo", required=True, help="repo root (dev/kb)")
+    ap.add_argument("--repo", required=True, help="repo root")
+    ap.add_argument("--kb-dir", required=True, help="KB home (~/.kb)")
     ap.add_argument("--claude-dir", required=True, help="host Claude config dir (~/.claude)")
     ap.add_argument("--apply", action="store_true", help="write (default: diff only)")
     ap.add_argument("--normalize-eol", action="store_true", help="also rewrite eol-only files to repo EOL")
@@ -207,8 +217,8 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     if args.rollback:
-        print(json.dumps(rollback(Path(args.claude_dir)), indent=2))
+        print(json.dumps(rollback(Path(args.kb_dir)), indent=2))
     elif args.apply:
-        print(json.dumps(apply(Path(args.repo), Path(args.claude_dir), normalize_eol=args.normalize_eol), indent=2))
+        print(json.dumps(apply(Path(args.repo), Path(args.kb_dir), Path(args.claude_dir), normalize_eol=args.normalize_eol), indent=2))
     else:
-        print(json.dumps(diff(Path(args.repo), Path(args.claude_dir)), indent=2))
+        print(json.dumps(diff(Path(args.repo), Path(args.kb_dir), Path(args.claude_dir)), indent=2))

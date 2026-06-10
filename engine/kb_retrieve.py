@@ -45,13 +45,17 @@ except Exception:
 # was exactly the "best guess" the deterministic-key rule forbids; removing it and
 # refusing to guess is compliant.
 try:
-    from kb_config import resolve_vault
+    from kb_config import resolve_vault, kb_home as _kb_home
     VAULT = resolve_vault(strict=False)
+    KB_HOME = _kb_home()
 except Exception:
     VAULT = None
+    KB_HOME = Path(os.environ.get("KB_HOME") or os.path.join(
+        os.environ.get("HOME", os.path.expanduser("~")), ".kb"))
 HOME = Path(os.environ.get("HOME", os.path.expanduser("~")))
-CACHE_DIR = HOME / ".claude" / "cache"
-LOG_DIR = HOME / ".claude" / "logs"
+CACHE_DIR = KB_HOME / "cache"
+LOG_DIR = KB_HOME / "logs"
+STATE_DIR = KB_HOME / "state"
 MANIFEST = CACHE_DIR / "kb-manifest.json"
 
 BUDGET_BYTES = int(os.environ.get("KB_BUDGET_BYTES", "15000"))
@@ -488,7 +492,7 @@ def _daemon_search_md(prompt: str, k: int):
     Returns list of dicts {path, score, ...} or None if daemon unreachable.
     Auto-spawn the daemon best-effort (this call falls back; next gets it)."""
     import socket as _sk
-    lock = HOME / ".claude" / "state" / "kb-embed-daemon.lock"
+    lock = STATE_DIR / "kb-embed-daemon.lock"
     if not lock.exists():
         _maybe_spawn_daemon()
         return None
@@ -535,7 +539,12 @@ def _daemon_search_md(prompt: str, k: int):
 def _maybe_spawn_daemon():
     """Detached spawn of the embedding daemon if not running. Non-blocking —
     this hook falls back to BM25 on the current call; next call uses daemon."""
-    here = Path(__file__).resolve().parent.parent / "scripts" / "kb-embed-daemon.py"
+    me = Path(__file__).resolve().parent
+    # Sibling in the flat layout (repo engine/ and deployed <kb home>/engine/);
+    # the pre-0.11 deploy split it into ../scripts/.
+    here = me / "kb-embed-daemon.py"
+    if not here.exists():
+        here = me.parent / "scripts" / "kb-embed-daemon.py"
     if not here.exists():
         return
     import subprocess as _sp
@@ -742,7 +751,7 @@ def _tier_state_path(session_id: str) -> Path | None:
     safe = _sanitize_session(session_id)
     if not safe:
         return None
-    state_dir = HOME / ".claude" / "state"
+    state_dir = STATE_DIR
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -870,7 +879,7 @@ def _token_state_path(session_id: str):
     safe = _sanitize_session(session_id)
     if not safe:
         return None
-    state_dir = HOME / ".claude" / "state"
+    state_dir = STATE_DIR
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
     except OSError:

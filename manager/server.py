@@ -57,7 +57,7 @@ CTYPES = {".html": "text/html; charset=utf-8", ".css": "text/css",
 
 def daemon_ping() -> dict:
     """Probe the embedding daemon with the same {"op":"ping"} the statusline uses."""
-    lock = install.claude_dir() / "state" / "kb-embed-daemon.lock"
+    lock = install.kb_dir() / "state" / "kb-embed-daemon.lock"
     if not lock.exists():
         return {"up": False, "reason": "no daemon lock"}
     try:
@@ -132,7 +132,7 @@ class Handler(BaseHTTPRequestHandler):
                 return None
 
     def _sync_history(self, limit: int = 50) -> list:
-        f = install.claude_dir() / "state" / "kb-sync-history.json"
+        f = install.kb_dir() / "state" / "kb-sync-history.json"
         if not f.exists():
             return []
         try:
@@ -143,13 +143,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _integration(self, enable: bool) -> dict:
         cdir = install.claude_dir()
-        killfile = cdir / "kb-hooks-disabled"
+        kdir = install.kb_dir()
+        killfile = kdir / "hooks-disabled"
+        legacy_kill = cdir / "kb-hooks-disabled"
         if enable:
             # Enable = remove the kill-switch + ensure hooks are wired (idempotent).
-            if killfile.exists():
-                killfile.unlink()
+            for kf in (killfile, legacy_kill):
+                if kf.exists():
+                    kf.unlink()
             try:
-                merged = merge_settings(cdir / "settings.json", cdir, dry_run=False)
+                merged = merge_settings(cdir / "settings.json", kdir, dry_run=False)
             except SettingsMergeError as e:
                 return {"enabled": True, "settings_error": str(e)}
             return {"enabled": True, "added": merged.get("added"), "skipped": merged.get("skipped")}
@@ -245,7 +248,7 @@ class Handler(BaseHTTPRequestHandler):
             t = str(body.get("time", scheduler.DEFAULT_TIME))
             if not _HHMM.match(t):
                 return self._send(400, {"error": "time must be HH:MM (24h)"})
-            return self._send(200, scheduler.register(install.claude_dir(), time_hhmm=t, dry_run=False))
+            return self._send(200, scheduler.register(install.kb_dir(), time_hhmm=t, dry_run=False))
         if path == "/api/integration":
             return self._send(200, self._integration(bool(body.get("enable", True))))
         if path == "/api/update":

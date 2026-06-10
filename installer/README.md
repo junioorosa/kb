@@ -1,10 +1,10 @@
 # KB installer
 
 Topology A: this repo is the source of truth; the installer copies the engine +
-adapters into the live layout (`~/.claude` — the engine's current data dir) and
+adapters into the live layout (`~/.kb` — the KB home; only the Claude Code slash commands land in `~/.claude`) and
 wires the Claude Code hooks. One command does both first-install and updates —
 re-running is always safe. The MCP server deploys with the engine: point any
-MCP host at `<home>/.claude/hooks/kb.py mcp` (config snippets in the root README).
+MCP host at `<home>/.kb/engine/kb.py mcp` (config snippets in the root README).
 
 ## Install / update
 
@@ -43,26 +43,34 @@ them). All the real work is in the OS-agnostic orchestrator `install.py`.
 
 ## What it does (each step idempotent, each re-runnable)
 
-1. **deploy** — copies engine (`hooks/` + `scripts/`) and adapter (`hooks/` +
-   `commands/`) into `~/.claude`. Diffs first; backs up every file it overwrites
-   into `~/.claude/.kb-backups/deploy-<ts>/`; a pure CRLF↔LF difference is left
-   alone. Copy-only — never deletes host files it doesn't own.
-2. **settings** — merges KB's hooks into `settings.json` **additively**. Foreign
-   hooks (other tools) are never touched; an unparseable `settings.json` is left
-   untouched and the install refuses rather than risk clobbering it. Backs up
-   before writing.
-3. **mcp** — wires the KB MCP server into every **detected** host (Codex CLI,
+1. **migrate** — one-time move of a pre-0.11 install: copies the config, the
+   `kb-*` state files and the version stamps from `~/.claude` into `~/.kb`, and
+   retires the old deployed engine files into `~/.kb/backups/migrate-<ts>/`
+   (name-exact — anything else in `hooks/`/`scripts/` is the user's and stays).
+   A fresh machine skips this entirely.
+2. **deploy** — copies the engine plus the adapter hook scripts FLAT into
+   `~/.kb/engine/`, and the Claude Code slash commands into `~/.claude/commands/`
+   (the one location Claude Code dictates). Diffs first; backs up every file it
+   overwrites into `~/.kb/backups/deploy-<ts>/`; a pure CRLF↔LF difference is
+   left alone. Copy-only — never deletes host files it doesn't own.
+3. **settings** — merges KB's hooks into `settings.json` **additively**. Foreign
+   hooks (other tools) are never touched; an entry that is recognizably OUR OWN
+   but points at a previous layout gets its command repointed (timeouts and
+   localized messages survive); an unparseable `settings.json` is left untouched
+   and the install refuses rather than risk clobbering it. Backs up before writing.
+4. **mcp** — wires the KB MCP server into every **detected** host (Codex CLI,
    Cursor, Claude Desktop, Gemini CLI, Windsurf). Same contract as settings:
-   additive, an existing `kb` entry is never overwritten, malformed configs are
-   refused untouched, every modified file gets a `*.kb-bak-<ts>` sibling. The
-   recorded command uses the absolute Python path (GUI hosts spawn MCP servers
-   without your shell PATH). Skip entirely with `--no-mcp-wire`.
-4. **scheduler** — registers the daily `kb-sync` job (Windows Task Scheduler /
-   macOS launchd / Linux cron).
-5. **version** — stamps `~/.claude/.kb-version` with this repo's `VERSION`, and
-   records the clone path in `~/.claude/.kb-source` so `kb manage` can find the
+   additive, a foreign/divergent `kb` entry is never overwritten (our own stale
+   wiring IS repointed), malformed configs are refused untouched, every modified
+   file gets a `*.kb-bak-<ts>` sibling. The recorded command uses the absolute
+   Python path (GUI hosts spawn MCP servers without your shell PATH). Skip
+   entirely with `--no-mcp-wire`.
+5. **scheduler** — registers the daily `kb-sync` job (Windows Task Scheduler /
+   macOS launchd / Linux cron), pointing at `~/.kb/engine/kb-sync.py`.
+6. **version** — stamps `~/.kb/.version` with this repo's `VERSION`, and
+   records the clone path in `~/.kb/.source` so `kb manage` can find the
    manager (which runs from the clone).
-6. **config** — checks `~/.claude/kb-workspaces.json`. It never fabricates a
+7. **config** — checks `~/.kb/config.json` (or the pre-0.11 `~/.claude/kb-workspaces.json`). It never fabricates a
    vault path; if the config is missing it tells you to set `vault` yourself
    (copy `config.example.json`). KB hooks degrade safely (no injection) until then.
 

@@ -4,7 +4,9 @@
 
 set -u
 
-[ -f "$HOME/.claude/kb-hooks-disabled" ] && exit 0
+KB="${KB_HOME:-$HOME/.kb}"
+[ -f "$KB/hooks-disabled" ] && exit 0
+[ -f "$HOME/.claude/kb-hooks-disabled" ] && exit 0  # legacy kill-switch, still honored
 [ "${KB_HOOKS_DISABLED:-0}" = "1" ] && exit 0
 
 PY="${KB_PYTHON:-}"
@@ -15,7 +17,8 @@ if [ -z "$PY" ]; then
   fi
 fi
 
-script="$HOME/.claude/hooks/kb-mark-intercept.py"
+script="$KB/engine/kb-mark-intercept.py"
+[ -f "$script" ] || script="$HOME/.claude/hooks/kb-mark-intercept.py"  # pre-0.11 layout
 if command -v cygpath >/dev/null 2>&1; then
   script=$(cygpath -w "$script")
 fi

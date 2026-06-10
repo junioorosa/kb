@@ -1,13 +1,23 @@
 #!/usr/bin/env python
-"""kb_config — shared config resolution for the KB engine (Phase 0 boundary).
+"""kb_config — shared config + path resolution for the KB engine.
 
-First brick of the model-facing engine. Resolves the vault location (and, later,
-full config) from a single source so the hook, the CLI, and kb-sync converge
-instead of each hardcoding paths.
+Single source of truth for WHERE the KB lives, so the hooks, the CLI, the MCP
+server, the sync and the installer converge instead of each hardcoding paths.
 
-Resolution order (current):
+KB home (the data dir):
+  1. KB_HOME env var
+  2. ~/.kb                              [canonical]
+  Layout: engine/ (deployed code), config.json, state/, cache/, logs/,
+  backups/, .version, .source, hooks-disabled (kill-switch).
+
+Config file:
+  1. <kb home>/config.json              [canonical]
+  2. ~/.claude/kb-workspaces.json       [legacy — pre-0.11 installs; read-only
+     fallback so an un-migrated machine keeps working. The installer migrates.]
+
+Vault resolution order:
   1. KB_VAULT env var
-  2. ~/.claude/kb-workspaces.json  ("vault" key)   [legacy/transitional location]
+  2. the config file's "vault" key
   3. unresolved -> None
 
 CONTRACT (load-bearing):
@@ -16,9 +26,6 @@ CONTRACT (load-bearing):
   - CLI / setup calls resolve_vault(strict=True): unresolved raises
     KBConfigError loudly. No "best guess" fallback — guessing the vault poisons
     retrieval — the one failure mode KB must never have. Degrade != guess.
-
-The vendor-neutral target location (~/.kb/config.json) is intentionally NOT read
-yet — its schema is undesigned. Adding it to the chain later is non-breaking.
 """
 from __future__ import annotations
 
@@ -35,8 +42,55 @@ def _home() -> Path:
     return Path(os.environ.get("HOME", os.path.expanduser("~")))
 
 
-def workspaces_path() -> Path:
+def kb_home() -> Path:
+    """The KB data dir: KB_HOME env -> ~/.kb. Never auto-created here; writers
+    mkdir the specific subdir they need."""
+    env = os.environ.get("KB_HOME")
+    if env and env.strip():
+        return Path(env.strip())
+    return _home() / ".kb"
+
+
+def state_dir() -> Path:
+    return kb_home() / "state"
+
+
+def cache_dir() -> Path:
+    return kb_home() / "cache"
+
+
+def logs_dir() -> Path:
+    return kb_home() / "logs"
+
+
+def legacy_workspaces_path() -> Path:
+    """Pre-0.11 config location (~/.claude/kb-workspaces.json)."""
     return _home() / ".claude" / "kb-workspaces.json"
+
+
+def workspaces_path() -> Path:
+    """The config file in effect: <kb home>/config.json when present (or when
+    nothing exists yet — new installs land there), else the legacy location if
+    only it exists. Read and write resolve through the SAME path so a
+    half-migrated machine can't split-brain between two configs."""
+    canonical = kb_home() / "config.json"
+    if canonical.exists():
+        return canonical
+    legacy = legacy_workspaces_path()
+    if legacy.exists():
+        return legacy
+    return canonical
+
+
+def hooks_disabled() -> bool:
+    """Kill-switch: KB_HOOKS_DISABLED env, <kb home>/hooks-disabled, or the
+    legacy ~/.claude/kb-hooks-disabled flag (still honored — it's a safety
+    switch; never strand one someone already set)."""
+    if os.environ.get("KB_HOOKS_DISABLED"):
+        return True
+    if (kb_home() / "hooks-disabled").exists():
+        return True
+    return (_home() / ".claude" / "kb-hooks-disabled").exists()
 
 
 def load_config() -> dict:

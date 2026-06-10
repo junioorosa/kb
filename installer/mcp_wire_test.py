@@ -31,11 +31,11 @@ def check(name, cond, extra=""):
         print(f"  FAIL {name}  {extra}")
 
 
-def wire(home: Path, cdir: Path, dry_run=False):
+def wire(home: Path, kdir: Path, dry_run=False):
     # local_packages MUST be injected too: without it the MSIX fallback would
     # scan the real %LOCALAPPDATA%\Packages and wire the machine's actual
     # Claude Desktop from inside the test suite.
-    return mcp_wire.wire_all(cdir, home=home, appdata=home / "AppData" / "Roaming",
+    return mcp_wire.wire_all(kdir, home=home, appdata=home / "AppData" / "Roaming",
                              local_packages=home / "AppData" / "Local" / "Packages",
                              dry_run=dry_run)
 
@@ -43,13 +43,13 @@ def wire(home: Path, cdir: Path, dry_run=False):
 def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
-        cdir = tmp / ".claude"
-        cdir.mkdir()
+        kdir = tmp / ".kb"
+        kdir.mkdir()
 
         print("test_nothing_detected")
         home0 = tmp / "home0"
         home0.mkdir()
-        rep = wire(home0, cdir)
+        rep = wire(home0, kdir)
         check("all hosts not-detected",
               all(r["status"] == "not-detected" for r in rep["hosts"].values()))
         check("nothing created on disk", list(home0.iterdir()) == [])
@@ -58,13 +58,13 @@ def main() -> int:
         srv = rep["server"]
         check("command is the absolute python", srv["command"] == str(Path(sys.executable)).replace("\\", "/"))
         check("args point at deployed kb.py + mcp",
-              srv["args"][0].endswith(".claude/hooks/kb.py") and srv["args"][1] == "mcp")
+              srv["args"][0].endswith(".kb/engine/kb.py") and srv["args"][1] == "mcp")
 
         # ---- JSON hosts -----------------------------------------------------
         print("test_json_fresh_config")
         home1 = tmp / "home1"
         (home1 / ".cursor").mkdir(parents=True)
-        rep = wire(home1, cdir)
+        rep = wire(home1, kdir)
         cur = rep["hosts"]["cursor"]
         check("cursor wired", cur["status"] == "wired", str(cur))
         data = json.loads((home1 / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
@@ -81,7 +81,7 @@ def main() -> int:
             "theme": "dark",
             "mcpServers": {"other-tool": {"command": "node", "args": ["x.js"]}},
         }), encoding="utf-8")
-        rep = wire(home2, cdir)
+        rep = wire(home2, kdir)
         g = rep["hosts"]["gemini"]
         data = json.loads((gem / "settings.json").read_text(encoding="utf-8"))
         check("gemini wired", g["status"] == "wired")
@@ -96,16 +96,61 @@ def main() -> int:
         divergent = {"mcpServers": {"kb": {"command": "my-custom-python", "args": ["mine.py"]}}}
         (cur3 / "mcp.json").write_text(json.dumps(divergent), encoding="utf-8")
         before = (cur3 / "mcp.json").read_bytes()
-        rep = wire(home3, cdir)
+        rep = wire(home3, kdir)
         check("divergent kb entry skipped", rep["hosts"]["cursor"]["status"] == "already")
         check("file byte-identical", (cur3 / "mcp.json").read_bytes() == before)
+
+        print("test_json_stale_own_entry_updated")
+        homeA = tmp / "homeA"
+        curA = homeA / ".cursor"
+        curA.mkdir(parents=True)
+        stale = {"mcpServers": {"kb": {
+            "command": "python",
+            "args": ["C:/Users/example/.claude/hooks/kb.py", "mcp"]}}}
+        (curA / "mcp.json").write_text(json.dumps(stale), encoding="utf-8")
+        rep = wire(homeA, kdir, dry_run=True)
+        check("dry-run reports would-update", rep["hosts"]["cursor"]["status"] == "would-update")
+        check("dry-run leaves stale file alone",
+              json.loads((curA / "mcp.json").read_text(encoding="utf-8")) == stale)
+        rep = wire(homeA, kdir)
+        c = rep["hosts"]["cursor"]
+        data = json.loads((curA / "mcp.json").read_text(encoding="utf-8"))
+        check("stale own entry updated", c["status"] == "updated")
+        check("entry now targets the engine kb.py",
+              data["mcpServers"]["kb"]["args"][0].endswith(".kb/engine/kb.py"))
+        check("update backed the file up", c["backup"] and Path(c["backup"]).exists())
+        rep = wire(homeA, kdir)
+        check("update is idempotent", rep["hosts"]["cursor"]["status"] == "already")
+
+        print("test_toml_stale_own_entry_updated")
+        homeB = tmp / "homeB"
+        (homeB / ".codex").mkdir(parents=True)
+        (homeB / ".codex" / "config.toml").write_text(
+            'model = "gpt-5.2"\n'
+            "\n[mcp_servers.kb]\n"
+            'command = "python"\n'
+            'args = ["C:/Users/example/.claude/hooks/kb.py", "mcp"]\n'
+            "\n[mcp_servers.other]\n"
+            'command = "node"\n'
+            'args = ["x.js"]\n', encoding="utf-8")
+        rep = wire(homeB, kdir)
+        cb = rep["hosts"]["codex"]
+        check("stale toml entry updated", cb["status"] == "updated", str(cb))
+        import tomllib as _toml
+        parsed = _toml.loads((homeB / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        check("toml kb args repointed",
+              parsed["mcp_servers"]["kb"]["args"][0].endswith(".kb/engine/kb.py"))
+        check("toml foreign table untouched",
+              parsed["mcp_servers"]["other"]["args"] == ["x.js"] and parsed["model"] == "gpt-5.2")
+        rep = wire(homeB, kdir)
+        check("toml update is idempotent", rep["hosts"]["codex"]["status"] == "already")
 
         print("test_json_malformed_refused")
         home4 = tmp / "home4"
         ws = home4 / ".codeium" / "windsurf"
         ws.mkdir(parents=True)
         (ws / "mcp_config.json").write_text("{ not valid", encoding="utf-8")
-        rep = wire(home4, cdir)
+        rep = wire(home4, kdir)
         w = rep["hosts"]["windsurf"]
         check("malformed json refused", w["status"] == "refused-malformed")
         check("malformed file untouched",
@@ -113,14 +158,14 @@ def main() -> int:
 
         print("test_json_top_level_array_refused")
         (ws / "mcp_config.json").write_text("[1, 2]", encoding="utf-8")
-        rep = wire(home4, cdir)
+        rep = wire(home4, kdir)
         check("non-object json refused", rep["hosts"]["windsurf"]["status"] == "refused-malformed")
 
         print("test_claude_desktop_appdata_path")
         home5 = tmp / "home5"
         appdata = home5 / "AppData" / "Roaming"
         (appdata / "Claude").mkdir(parents=True)
-        rep = mcp_wire.wire_all(cdir, home=home5, appdata=appdata,
+        rep = mcp_wire.wire_all(kdir, home=home5, appdata=appdata,
                                 local_packages=home5 / "AppData" / "Local" / "Packages")
         cd = rep["hosts"]["claude-desktop"]
         if sys.platform == "win32":
@@ -137,7 +182,7 @@ def main() -> int:
         pkgs = home5b / "AppData" / "Local" / "Packages"
         msix_cfg_dir = pkgs / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude"
         msix_cfg_dir.mkdir(parents=True)
-        rep = mcp_wire.wire_all(cdir, home=home5b, appdata=home5b / "AppData" / "Roaming",
+        rep = mcp_wire.wire_all(kdir, home=home5b, appdata=home5b / "AppData" / "Roaming",
                                 local_packages=pkgs)
         cd = rep["hosts"]["claude-desktop"]
         if sys.platform == "win32":
@@ -160,7 +205,7 @@ def main() -> int:
         print("test_toml_fresh")
         home6 = tmp / "home6"
         (home6 / ".codex").mkdir(parents=True)
-        rep = wire(home6, cdir)
+        rep = wire(home6, kdir)
         cx = rep["hosts"]["codex"]
         check("codex wired", cx["status"] == "wired", str(cx))
         toml_text = (home6 / ".codex" / "config.toml").read_text(encoding="utf-8")
@@ -173,7 +218,7 @@ def main() -> int:
         (home7 / ".codex").mkdir(parents=True)
         existing = 'model = "o4-mini"\n\n[mcp_servers.linear]\ncommand = "npx"\nargs = ["linear-mcp"]\n'
         (home7 / ".codex" / "config.toml").write_text(existing, encoding="utf-8")
-        rep = wire(home7, cdir)
+        rep = wire(home7, kdir)
         toml_text = (home7 / ".codex" / "config.toml").read_text(encoding="utf-8")
         parsed = tomllib.loads(toml_text)
         check("codex wired alongside existing", rep["hosts"]["codex"]["status"] == "wired")
@@ -184,7 +229,7 @@ def main() -> int:
 
         print("test_toml_existing_kb_skipped")
         before = (home7 / ".codex" / "config.toml").read_bytes()
-        rep = wire(home7, cdir)
+        rep = wire(home7, kdir)
         check("second run skips", rep["hosts"]["codex"]["status"] == "already")
         check("toml byte-identical", (home7 / ".codex" / "config.toml").read_bytes() == before)
 
@@ -192,7 +237,7 @@ def main() -> int:
         home8 = tmp / "home8"
         (home8 / ".codex").mkdir(parents=True)
         (home8 / ".codex" / "config.toml").write_text("model = [unclosed", encoding="utf-8")
-        rep = wire(home8, cdir)
+        rep = wire(home8, kdir)
         check("malformed toml refused", rep["hosts"]["codex"]["status"] == "refused-malformed")
         check("malformed toml untouched",
               (home8 / ".codex" / "config.toml").read_text(encoding="utf-8") == "model = [unclosed")
@@ -207,7 +252,7 @@ def main() -> int:
               existing_agents.is_file() and "kb_search" in existing_agents.read_text(encoding="utf-8"))
         own = "# My own rules\nAlways be terse.\n"
         existing_agents.write_text(own + existing_agents.read_text(encoding="utf-8"), encoding="utf-8")
-        rep = wire(home7, cdir)
+        rep = wire(home7, kdir)
         text = existing_agents.read_text(encoding="utf-8")
         check("user content preserved on re-run", text.startswith("# My own rules"))
         check("block not duplicated", text.count(mcp_wire.AGENTS_BEGIN) == 1)
@@ -215,7 +260,7 @@ def main() -> int:
         # ---- idempotency / dry-run -------------------------------------------
         print("test_idempotent_wire_all")
         snap = {p: p.read_bytes() for p in home6.rglob("*") if p.is_file()}
-        rep = wire(home6, cdir)
+        rep = wire(home6, kdir)
         check("everything already on re-run",
               all(r["status"] in ("already", "not-detected") for r in rep["hosts"].values()))
         check("no byte changed on re-run",
@@ -225,7 +270,7 @@ def main() -> int:
         home9 = tmp / "home9"
         (home9 / ".cursor").mkdir(parents=True)
         (home9 / ".codex").mkdir(parents=True)
-        rep = wire(home9, cdir, dry_run=True)
+        rep = wire(home9, kdir, dry_run=True)
         check("dry-run reports would-wire",
               rep["hosts"]["cursor"]["status"] == "would-wire"
               and rep["hosts"]["codex"]["status"] == "would-wire")

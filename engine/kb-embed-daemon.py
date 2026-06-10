@@ -22,7 +22,7 @@ Concurrency: single-threaded request loop is fine — embedding is fast, GIL
 holds during the (rare) model.encode call. Multiple concurrent hook calls
 serialize, no race on the store.
 
-Lockfile (~/.claude/state/kb-embed-daemon.lock) holds {pid, port, started_at}
+Lockfile (<kb home>/state/kb-embed-daemon.lock) holds {pid, port, started_at}
 so clients/auto-spawn know if it's already running.
 """
 from __future__ import annotations
@@ -39,9 +39,10 @@ import time
 from pathlib import Path
 
 HOME = Path(os.environ.get("HOME", os.path.expanduser("~")))
-STATE_DIR = HOME / ".claude" / "state"
+KB_HOME = Path(os.environ.get("KB_HOME") or (HOME / ".kb"))
+STATE_DIR = KB_HOME / "state"
 LOCK_PATH = STATE_DIR / "kb-embed-daemon.lock"
-LOG_PATH = HOME / ".claude" / "logs" / "kb-embed-daemon.log"
+LOG_PATH = KB_HOME / "logs" / "kb-embed-daemon.log"
 
 DEFAULT_PORT = int(os.environ.get("KB_EMBED_DAEMON_PORT", "47821"))
 BIND_HOST = "127.0.0.1"

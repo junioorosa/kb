@@ -9,12 +9,15 @@ One command for first-install AND "update certinho":
     python installer/install.py --status   # what's installed (version, scheduler)
 
 Steps (each idempotent, each safe to re-run):
-  1. deploy      engine + adapter files into ~/.claude (diff -> backup -> copy)
-  2. settings    merge KB hooks into settings.json (additive, never clobbers)
-  3. mcp         wire the KB MCP server into detected hosts (codex/cursor/...)
-  4. scheduler   register the daily kb-sync job (per-OS)
-  5. version     stamp ~/.claude/.kb-version with the repo's VERSION
-  6. config      check kb-workspaces.json; never fabricate a vault path
+  1. migrate     pre-0.11 ~/.claude data -> ~/.kb (config/state/stamps; retires
+                 the old deployed engine into a backup)
+  2. deploy      engine into <kb home>/engine + slash commands into ~/.claude
+  3. settings    merge KB hooks into settings.json (additive; repoints our own
+                 stale entries, never clobbers foreign ones)
+  4. mcp         wire the KB MCP server into detected hosts (codex/cursor/...)
+  5. scheduler   register the daily kb-sync job (per-OS)
+  6. version     stamp <kb home>/.version with the repo's VERSION
+  7. config      check the config file; never fabricate a vault path
 
 The per-OS bootstrap scripts (install.ps1 / install.sh) only ensure Python + deps
 exist, then call this. Everything load-bearing lives here so all hosts agree.
@@ -47,37 +50,133 @@ def claude_dir() -> Path:
     return Path.home() / ".claude"
 
 
+def kb_dir() -> Path:
+    env = os.environ.get("KB_HOME")
+    if env and env.strip():
+        return Path(env.strip())
+    return Path.home() / ".kb"
+
+
 def repo_version() -> str:
     f = REPO_ROOT / "VERSION"
     return f.read_text(encoding="utf-8").strip() if f.exists() else "0.0.0"
 
 
-def installed_version(cdir: Path) -> str | None:
-    f = cdir / ".kb-version"
+def installed_version(kdir: Path) -> str | None:
+    f = kdir / ".version"
+    if not f.exists():  # pre-0.11 stamp location
+        f = claude_dir() / ".kb-version"
     return f.read_text(encoding="utf-8").strip() if f.exists() else None
 
 
 # --- Steps -------------------------------------------------------------------
 
-def step_deploy(cdir: Path, apply: bool) -> dict:
+# The exact files the pre-0.11 deploy scattered into ~/.claude. Retiring them is
+# name-exact: anything else in hooks/ or scripts/ belongs to the user.
+_LEGACY_ENGINE = {
+    "hooks": ["kb.py", "kb_config.py", "kb_retrieve.py", "kb_mcp.py",
+              "kb-context.sh", "kb-bodyread-track.py", "kb-bodyread-track.sh",
+              "kb-embed-daemon-spawn.sh", "kb-mark-intercept.py", "kb-mark-intercept.sh",
+              "kb-stats-intercept.py", "kb-stats-intercept.sh",
+              "kb-statusline-fragment.ps1"],
+    "scripts": ["kb-sync.py", "kb-embed.py", "kb-embed-daemon.py"],
+}
+
+
+def step_migrate(kdir: Path, cdir: Path, apply: bool) -> dict:
+    """One-time (idempotent) move of a pre-0.11 install from ~/.claude to ~/.kb.
+
+    Copies what the engine reads (config, state, stamps, kill-switch) and
+    retires the old deployed engine files into <kb home>/backups/migrate-<ts>/
+    so nothing stale answers a hook or a scheduled run. The legacy config FILE
+    is left in place (read-fallback for anything not yet repointed); once the
+    canonical config exists it is ignored by resolution.
+    """
+    import shutil
+    import time as _t
+    rep = {"needed": False, "config": None, "state_files": 0, "stamps": [],
+           "retired": [], "kill_switch": False, "dry_run": not apply}
+
+    legacy_cfg = cdir / "kb-workspaces.json"
+    new_cfg = kdir / "config.json"
+    if legacy_cfg.exists() and not new_cfg.exists():
+        rep["needed"] = True
+        rep["config"] = f"{legacy_cfg} -> {new_cfg}"
+        if apply:
+            kdir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(legacy_cfg, new_cfg)
+
+    legacy_state = cdir / "state"
+    new_state = kdir / "state"
+    if legacy_state.is_dir():
+        for f in sorted(legacy_state.glob("kb-*")):
+            dst = new_state / f.name
+            if dst.exists():
+                continue
+            rep["needed"] = True
+            rep["state_files"] += 1
+            if apply:
+                new_state.mkdir(parents=True, exist_ok=True)
+                if f.is_dir():
+                    shutil.copytree(f, dst)
+                else:
+                    shutil.copy2(f, dst)
+
+    for legacy_name, new_name in ((".kb-version", ".version"), (".kb-source", ".source")):
+        lf, nf = cdir / legacy_name, kdir / new_name
+        if lf.exists() and not nf.exists():
+            rep["needed"] = True
+            rep["stamps"].append(new_name)
+            if apply:
+                kdir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(lf, nf)
+
+    if (cdir / "kb-hooks-disabled").exists() and not (kdir / "hooks-disabled").exists():
+        rep["needed"] = True
+        rep["kill_switch"] = True
+        if apply:
+            kdir.mkdir(parents=True, exist_ok=True)
+            (kdir / "hooks-disabled").write_text("", encoding="utf-8")
+
+    retire: list[Path] = []
+    for sub, names in _LEGACY_ENGINE.items():
+        for name in names:
+            f = cdir / sub / name
+            if f.exists():
+                retire.append(f)
+    if retire:
+        rep["needed"] = True
+        rep["retired"] = [str(f) for f in retire]
+        if apply:
+            ts = _t.strftime("%Y%m%dT%H%M%S")
+            bdir = kdir / "backups" / f"migrate-{ts}"
+            for f in retire:
+                dst = bdir / f.relative_to(cdir)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(f), str(dst))
+            rep["backup_dir"] = str(bdir)
+    return rep
+
+
+def step_deploy(kdir: Path, cdir: Path, apply: bool) -> dict:
     if apply:
-        return deploy.apply(REPO_ROOT, cdir)
-    return deploy.diff(REPO_ROOT, cdir)
+        return deploy.apply(REPO_ROOT, kdir, cdir)
+    return deploy.diff(REPO_ROOT, kdir, cdir)
 
 
-def step_settings(cdir: Path, apply: bool) -> dict:
+def step_settings(kdir: Path, cdir: Path, apply: bool) -> dict:
     try:
-        return merge_settings(cdir / "settings.json", cdir, dry_run=not apply)
+        return merge_settings(cdir / "settings.json", kdir, dry_run=not apply)
     except SettingsMergeError as e:
         return {"error": str(e)}
 
 
-def step_mcp(cdir: Path, apply: bool) -> dict:
-    return mcp_wire.wire_all(cdir, dry_run=not apply)
+def step_mcp(kdir: Path, apply: bool) -> dict:
+    return mcp_wire.wire_all(kdir, dry_run=not apply)
 
 
-def step_scheduler(cdir: Path, apply: bool, time_hhmm: str) -> dict:
-    return scheduler.register(cdir, time_hhmm=time_hhmm, dry_run=not apply)
+def step_scheduler(kdir: Path, apply: bool, time_hhmm: str) -> dict:
+    return scheduler.register(kdir, time_hhmm=time_hhmm, dry_run=not apply)
 
 
 def step_shortcut(apply: bool) -> dict:
@@ -86,34 +185,40 @@ def step_shortcut(apply: bool) -> dict:
     return shortcut.create_shortcut(REPO_ROOT, dry_run=not apply)
 
 
-def step_version(cdir: Path, apply: bool) -> dict:
-    rep = {"from": installed_version(cdir), "to": repo_version()}
+def step_version(kdir: Path, apply: bool) -> dict:
+    rep = {"from": installed_version(kdir), "to": repo_version()}
     if apply:
-        (cdir / ".kb-version").write_text(repo_version() + "\n", encoding="utf-8")
+        kdir.mkdir(parents=True, exist_ok=True)
+        (kdir / ".version").write_text(repo_version() + "\n", encoding="utf-8")
         # Record where the clone lives so the deployed CLI (`kb manage`) can find
         # the manager app, which runs from the source tree (Phase 2: no separate
         # deploy of the manager — the repo is already required to install/update).
-        (cdir / ".kb-source").write_text(str(REPO_ROOT) + "\n", encoding="utf-8")
+        (kdir / ".source").write_text(str(REPO_ROOT) + "\n", encoding="utf-8")
         rep["stamped"] = True
         rep["source"] = str(REPO_ROOT)
     return rep
 
 
-def step_config(cdir: Path) -> dict:
+def step_config(kdir: Path) -> dict:
     """Report config presence. NEVER fabricate a vault path (poisons retrieval)."""
-    cfg = cdir / "kb-workspaces.json"
+    cfg = kdir / "config.json"
     if not cfg.exists():
-        return {
-            "present": False,
-            "note": ("kb-workspaces.json missing. Copy installer/config.example.json there and set "
-                     "'vault' to your vault path. KB hooks degrade safely (no injection) until set."),
-        }
+        legacy = claude_dir() / "kb-workspaces.json"
+        if legacy.exists():
+            cfg = legacy  # un-migrated machine: resolution still honors it
+        else:
+            return {
+                "present": False,
+                "note": (f"config missing. Copy config.example.json to {cfg} and set "
+                         "'vault' to your vault path. KB hooks degrade safely (no injection) until set."),
+            }
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))
         vault = data.get("vault")
-        return {"present": True, "vault": vault, "vault_exists": bool(vault) and Path(vault).exists()}
+        return {"present": True, "path": str(cfg), "vault": vault,
+                "vault_exists": bool(vault) and Path(vault).exists()}
     except json.JSONDecodeError as e:
-        return {"present": True, "error": f"kb-workspaces.json is not valid JSON: {e}"}
+        return {"present": True, "path": str(cfg), "error": f"config is not valid JSON: {e}"}
 
 
 # --- Orchestration -----------------------------------------------------------
@@ -121,6 +226,7 @@ def step_config(cdir: Path) -> dict:
 def run(apply: bool, time_hhmm: str, scheduler_apply: bool | None = None,
         shortcut_apply: bool | None = None, mcp_apply: bool | None = None) -> dict:
     cdir = claude_dir()
+    kdir = kb_dir()
     # The scheduler keys off a global task name, not claude_dir; `scheduler_apply`
     # lets a caller install everything else while leaving the schedule untouched
     # (also how the E2E test avoids clobbering a real ClaudeKbSync from a temp dir).
@@ -137,28 +243,31 @@ def run(apply: bool, time_hhmm: str, scheduler_apply: bool | None = None,
     report = {
         "mode": "apply" if apply else "dry-run",
         "repo": str(REPO_ROOT),
+        "kb_dir": str(kdir),
         "claude_dir": str(cdir),
-        "version": {"from": installed_version(cdir), "to": repo_version()},
-        "deploy": step_deploy(cdir, apply),
-        "settings": step_settings(cdir, apply),
-        "mcp": step_mcp(cdir, mcp_apply),
-        "scheduler": step_scheduler(cdir, scheduler_apply, time_hhmm),
+        "version": {"from": installed_version(kdir), "to": repo_version()},
+        "migrate": step_migrate(kdir, cdir, apply),
+        "deploy": step_deploy(kdir, cdir, apply),
+        "settings": step_settings(kdir, cdir, apply),
+        "mcp": step_mcp(kdir, mcp_apply),
+        "scheduler": step_scheduler(kdir, scheduler_apply, time_hhmm),
         "shortcut": step_shortcut(shortcut_apply),
-        "config": step_config(cdir),
+        "config": step_config(kdir),
     }
     if apply:
-        report["version_stamp"] = step_version(cdir, apply)
+        report["version_stamp"] = step_version(kdir, apply)
     return report
 
 
 def status() -> dict:
-    cdir = claude_dir()
+    kdir = kb_dir()
     return {
-        "claude_dir": str(cdir),
-        "installed_version": installed_version(cdir),
+        "kb_dir": str(kdir),
+        "claude_dir": str(claude_dir()),
+        "installed_version": installed_version(kdir),
         "repo_version": repo_version(),
-        "scheduler": scheduler.status(cdir),
-        "config": step_config(cdir),
+        "scheduler": scheduler.status(kdir),
+        "config": step_config(kdir),
     }
 
 
@@ -287,13 +396,20 @@ def update_apply(cdir: Path | None = None) -> dict:
 def _vault_path(cdir: Path | None = None) -> Path | None:
     """The configured vault path, or None. NEVER fabricated — an absent/invalid
     config yields None, callers report it. Mirrors engine kb_config.resolve_vault's
-    order exactly (KB_VAULT env first, then kb-workspaces.json 'vault') so this and
-    the manager's knowledge view always resolve the SAME vault."""
+    order (KB_VAULT env first, then the config file) so this and the manager's
+    knowledge view always resolve the SAME vault. An explicit `cdir` scopes the
+    lookup to that dir alone (tests / callers overriding the machine config)."""
     env = os.environ.get("KB_VAULT")
     if env and env.strip():
         return Path(env.strip())
-    cdir = cdir or claude_dir()
-    cfg = cdir / "kb-workspaces.json"
+    if cdir is not None:
+        cfg = Path(cdir) / "config.json"
+        if not cfg.exists():
+            cfg = Path(cdir) / "kb-workspaces.json"
+    else:
+        cfg = kb_dir() / "config.json"
+        if not cfg.exists():
+            cfg = claude_dir() / "kb-workspaces.json"
     if not cfg.exists():
         return None
     try:
@@ -460,6 +576,17 @@ def vault_pull_remote(cdir: Path | None = None) -> dict:
 
 def _summary(rep: dict) -> str:
     lines = [f"KB installer [{rep['mode']}]  v{rep['version']['from'] or '-'} -> v{rep['version']['to']}"]
+    mg = rep.get("migrate") or {}
+    if mg.get("needed"):
+        bits = []
+        if mg.get("config"):
+            bits.append("config")
+        if mg.get("state_files"):
+            bits.append(f"{mg['state_files']} state file(s)")
+        if mg.get("retired"):
+            bits.append(f"{len(mg['retired'])} old engine file(s) retired")
+        lines.append(f"  migrate  : ~/.claude -> ~/.kb ({', '.join(bits) or 'stamps'})"
+                     + ("" if not mg.get("dry_run") else "  [dry-run]"))
     d = rep["deploy"]
     if "buckets" in d:  # dry-run diff
         b = d["buckets"]
@@ -473,16 +600,19 @@ def _summary(rep: dict) -> str:
     if "error" in s:
         lines.append(f"  settings : ERROR {s['error']}")
     else:
-        lines.append(f"  settings : +{len(s.get('added', []))} added, {len(s.get('skipped', []))} present"
+        lines.append(f"  settings : +{len(s.get('added', []))} added, "
+                     f"{len(s.get('updated', []))} repointed, {len(s.get('skipped', []))} present"
                      + (f", backup {s['backup']}" if s.get("backup") else ""))
     m = rep.get("mcp") or {}
     hosts = m.get("hosts", {})
     wired = [n for n, r in hosts.items() if r.get("status") in ("wired", "would-wire")]
+    updated = [n for n, r in hosts.items() if r.get("status") in ("updated", "would-update")]
     present = [n for n, r in hosts.items() if r.get("status") == "already"]
     problems = [n for n, r in hosts.items() if r.get("status") in ("refused-malformed", "error")]
     detected = [n for n, r in hosts.items() if r.get("status") != "not-detected"]
     desc = (f"{len(detected)} host(s) detected"
             + (f", wired: {', '.join(wired)}" if wired else "")
+            + (f", repointed: {', '.join(updated)}" if updated else "")
             + (f", present: {', '.join(present)}" if present else "")
             + (f", PROBLEM: {', '.join(problems)}" if problems else ""))
     lines.append(f"  mcp      : {desc}")
@@ -520,7 +650,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     if args.rollback:
-        out = deploy.rollback(claude_dir())
+        out = deploy.rollback(kb_dir())
         print(json.dumps(out, indent=2))
     elif args.status:
         out = status()

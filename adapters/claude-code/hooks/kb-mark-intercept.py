@@ -27,8 +27,12 @@ def emit(msg: str) -> None:
     sys.stdout.flush()
 
 
+def _kb_home() -> str:
+    return os.environ.get("KB_HOME") or os.path.join(os.path.expanduser("~"), ".kb")
+
+
 def sidecar_path(session_id: str) -> str:
-    state_dir = os.path.join(os.path.expanduser("~"), ".claude", "state")
+    state_dir = os.path.join(_kb_home(), "state")
     os.makedirs(state_dir, exist_ok=True)
     return os.path.join(state_dir, f"kb-session-branch-{session_id}.json")
 
@@ -147,7 +151,9 @@ def set_index_status(rel_folder: str, status: str) -> bool:
 def main() -> int:
     if os.environ.get("KB_HOOKS_DISABLED") == "1":
         return 0
-    if os.path.isfile(os.path.expanduser("~/.claude/kb-hooks-disabled")):
+    if os.path.isfile(os.path.join(_kb_home(), "hooks-disabled")):
+        return 0
+    if os.path.isfile(os.path.expanduser("~/.claude/kb-hooks-disabled")):  # legacy
         return 0
 
     try:

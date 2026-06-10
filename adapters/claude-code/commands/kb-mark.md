@@ -71,7 +71,7 @@ fi
 # Guessing the sidecar (e.g. the most recent one across all sessions) could mark the
 # WRONG session, so refuse rather than guess.
 echo "ERROR: /kb-mark requires the kb-mark-intercept hook, which appears disabled"
-echo "       (KB_HOOKS_DISABLED=1, or ~/.claude/kb-hooks-disabled is present)."
+echo "       (KB_HOOKS_DISABLED=1, or ~/.kb/hooks-disabled is present)."
 echo "       Re-enable KB hooks, then re-run: /kb-mark ${branch}"
 exit 1
 ```
