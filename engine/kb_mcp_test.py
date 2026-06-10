@@ -1,0 +1,232 @@
+#!/usr/bin/env python
+"""kb_mcp_test.py — protocol tests for the MCP stdio server (kb_mcp.py).
+
+Spawns the real server (`kb.py mcp`) as a subprocess with an isolated HOME and
+a fixture vault, speaks newline-delimited JSON-RPC to it, and asserts on the
+responses. KB_FAST_MODE=1 keeps retrieval on the deterministic BM25-only path
+(no embedding daemon needed). No network, no live vault.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ENGINE = Path(__file__).resolve().parent
+KB_CLI = ENGINE / "kb.py"
+
+PASSED = 0
+FAILED = 0
+
+
+def check(label: str, ok: bool, extra: str = "") -> None:
+    global PASSED, FAILED
+    if ok:
+        PASSED += 1
+        print(f"  ok   {label}")
+    else:
+        FAILED += 1
+        print(f"  FAIL {label}  {extra}")
+
+
+def make_vault(root: Path) -> Path:
+    vault = root / "vault"
+    learn = vault / "ws" / "proj" / "Learnings"
+    learn.mkdir(parents=True)
+    (learn / "lock-oracle.md").write_text(
+        "---\n"
+        "description: Lock por chave de negocio em integracao Oracle\n"
+        "tags: [lock, oracle, integracao]\n"
+        "scope: project\n"
+        "---\n"
+        "# Lock por chave\n"
+        "Serializa requests concorrentes pela chave de negocio. MARKER-LOCK-BODY\n"
+        "Ver [[etiqueta-amazon]].\n",
+        encoding="utf-8",
+    )
+    (learn / "etiqueta-amazon.md").write_text(
+        "---\n"
+        "description: Etiqueta de transporte para Amazon com idempotencia\n"
+        "tags: [etiqueta, amazon]\n"
+        "scope: project\n"
+        "---\n"
+        "# Etiqueta Amazon\n"
+        "Gerar etiqueta uma vez so. MARKER-ETIQUETA-BODY\n",
+        encoding="utf-8",
+    )
+    ws_learn = vault / "ws" / "Learnings"
+    ws_learn.mkdir(parents=True)
+    (ws_learn / "metodo-curto.md").write_text(
+        "---\n"
+        "description: Metodos longos quebrados em sub-metodos privados\n"
+        "tags: [sonar]\n"
+        "scope: workspace\n"
+        "---\n"
+        "Regra de metodo curto.\n",
+        encoding="utf-8",
+    )
+    ticket = vault / "ws" / "proj" / "fix" / "login"
+    ticket.mkdir(parents=True)
+    (ticket / "_index.md").write_text(
+        "---\n"
+        "title: Fix login timeout\n"
+        "status: in-progress\n"
+        "branch: fix/login\n"
+        "---\n"
+        "Ticket do login. MARKER-TICKET-INDEX\n",
+        encoding="utf-8",
+    )
+    return vault
+
+
+def run_server(home: Path, vault: Path, requests: list) -> list:
+    """Send all requests, close stdin, return the list of parsed responses."""
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["KB_VAULT"] = str(vault)
+    env["KB_FAST_MODE"] = "1"
+    env.pop("KB_HOOKS_DISABLED", None)
+    payload = "".join(json.dumps(r) + "\n" for r in requests)
+    proc = subprocess.run(
+        [sys.executable, str(KB_CLI), "mcp"],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        encoding="utf-8",
+    )
+    responses = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if line:
+            responses.append(json.loads(line))
+    return responses
+
+
+def by_id(responses: list, req_id) -> dict:
+    return next((r for r in responses if r.get("id") == req_id), {})
+
+
+def tool_text(resp: dict) -> str:
+    content = (resp.get("result") or {}).get("content") or []
+    return "".join(c.get("text", "") for c in content if c.get("type") == "text")
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d) / "home"
+        home.mkdir()
+        vault = make_vault(Path(d))
+
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "kb_search", "arguments": {"query": "lock oracle integracao"}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+             "params": {"name": "kb_context", "arguments": {"prompt": "lock oracle integracao"}}},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+             "params": {"name": "kb_read", "arguments": {"path": "ws/proj/Learnings/lock-oracle.md"}}},
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+             "params": {"name": "kb_read", "arguments": {"path": "../../outside.md"}}},
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+             "params": {"name": "kb_read", "arguments": {"path": "ws/proj/Learnings/missing.md"}}},
+            {"jsonrpc": "2.0", "id": 8, "method": "bogus/method"},
+            {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+             "params": {"name": "nope", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 10, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+             "params": {"name": "kb_context",
+                        "arguments": {"prompt": "lock oracle integracao", "branch": "fix/login"}}},
+        ]
+        responses = run_server(home, vault, requests)
+
+        print("test_initialize")
+        init = by_id(responses, 1)
+        res = init.get("result") or {}
+        check("responds to initialize", bool(res))
+        check("echoes client protocolVersion", res.get("protocolVersion") == "2025-03-26")
+        check("serverInfo.name is kb", (res.get("serverInfo") or {}).get("name") == "kb")
+        check("declares tools capability", "tools" in (res.get("capabilities") or {}))
+        check("notification got no response", all(r.get("id") is not None for r in responses))
+
+        print("test_tools_list")
+        tl = by_id(responses, 2)
+        tools = (tl.get("result") or {}).get("tools") or []
+        names = {t.get("name") for t in tools}
+        check("three tools", names == {"kb_search", "kb_context", "kb_read"}, str(names))
+        check("every tool has inputSchema", all(t.get("inputSchema") for t in tools))
+        check("search description is prescriptive (when-to-call)",
+              "BEFORE proposing" in next((t["description"] for t in tools if t["name"] == "kb_search"), ""))
+
+        print("test_kb_search")
+        sr = by_id(responses, 3)
+        stext = tool_text(sr)
+        check("search not an error", not (sr.get("result") or {}).get("isError"), stext[:120])
+        check("search finds the lock note", "lock-oracle.md" in stext, stext[:200])
+        check("search ranks lock above etiqueta",
+              stext.find("lock-oracle.md") < (stext.find("etiqueta-amazon.md") if "etiqueta-amazon.md" in stext else len(stext)))
+
+        print("test_kb_context")
+        cr = by_id(responses, 4)
+        ctext = tool_text(cr)
+        check("context not an error", not (cr.get("result") or {}).get("isError"), ctext[:120])
+        check("context emits vault-context block", "<vault-context>" in ctext)
+        check("context cites the lock note", "lock-oracle.md" in ctext)
+
+        print("test_kb_read")
+        rr = by_id(responses, 5)
+        rtext = tool_text(rr)
+        check("read returns the body", "MARKER-LOCK-BODY" in rtext, rtext[:120])
+
+        print("test_kb_read_sandbox")
+        esc = by_id(responses, 6)
+        check("traversal flagged as tool error", (esc.get("result") or {}).get("isError") is True)
+        miss = by_id(responses, 7)
+        check("missing note flagged as tool error", (miss.get("result") or {}).get("isError") is True)
+
+        print("test_kb_context_with_branch")
+        cb = by_id(responses, 11)
+        cbt = tool_text(cb)
+        check("branch arg pulls the ticket block", "fix/login" in cbt and "Fix login timeout" in cbt, cbt[:200])
+
+        print("test_kb_mark_cli")
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["KB_VAULT"] = str(vault)
+        mk = subprocess.run([sys.executable, str(KB_CLI), "mark", "--done", "feat/from-codex"],
+                            capture_output=True, text=True, env=env, timeout=30)
+        check("kb mark --done exits 0", mk.returncode == 0, mk.stderr[:200])
+        sidecars = list((home / ".claude" / "state").glob("kb-session-branch-cli-*.json"))
+        check("writes one cli sidecar", len(sidecars) == 1)
+        data = json.loads(sidecars[0].read_text(encoding="utf-8")) if sidecars else {}
+        check("sidecar carries branch + manual_done",
+              data.get("branch") == "feat/from-codex" and data.get("manual_done") is True)
+        bare = subprocess.run([sys.executable, str(KB_CLI), "mark"],
+                              capture_output=True, text=True, env=env, timeout=30,
+                              cwd=str(home))
+        check("bare kb mark refuses with usage", bare.returncode == 2 and "--done" in bare.stderr)
+
+        print("test_protocol_errors")
+        bogus = by_id(responses, 8)
+        check("unknown method -> -32601", (bogus.get("error") or {}).get("code") == -32601)
+        unknown_tool = by_id(responses, 9)
+        check("unknown tool -> -32602", (unknown_tool.get("error") or {}).get("code") == -32602)
+        ping = by_id(responses, 10)
+        check("ping answered", ping.get("result") == {})
+
+    print(f"\n{PASSED} passed, {FAILED} failed")
+    return 1 if FAILED else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

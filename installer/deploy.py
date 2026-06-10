@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Deploy KB engine + Claude Code adapter from the repo into the host (~/.claude).
+"""Deploy the KB engine + adapters from the repo into the live layout (~/.claude).
+
+~/.claude is the engine's CURRENT data dir (a historical artifact, not a
+dependency on Claude Code): the MCP server, the manager and the nightly sync
+all run from it regardless of which host talks to the KB. Relocating to a
+neutral ~/.kb/ home is a planned, separate migration.
 
 Topology A: the repo is the source of truth; this step copies files into the
 live host layout. It is the spine of both first-install and "update certinho".
@@ -28,7 +33,7 @@ from pathlib import Path
 
 # --- Manifest ----------------------------------------------------------------
 # Engine splits across two host dirs (load-bearing — see module docstring).
-ENGINE_TO_HOOKS = ["kb.py", "kb_config.py", "kb_retrieve.py"]
+ENGINE_TO_HOOKS = ["kb.py", "kb_config.py", "kb_retrieve.py", "kb_mcp.py"]
 ENGINE_TO_SCRIPTS = ["kb-sync.py", "kb-embed.py", "kb-embed-daemon.py"]
 
 

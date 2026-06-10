@@ -44,10 +44,11 @@ def test_fresh_apply():
     with tempfile.TemporaryDirectory() as d:
         repo, claude = Path(d) / "repo", Path(d) / ".claude"
         make_repo(repo)
+        expected = len(ENGINE_TO_HOOKS) + len(ENGINE_TO_SCRIPTS) + 2  # +2 adapter files
         dd = diff(repo, claude)
-        check("all new on empty host", len(dd["buckets"]["new"]) == dd["total"] and dd["total"] == 8)
+        check("all new on empty host", len(dd["buckets"]["new"]) == dd["total"] and dd["total"] == expected)
         rep = apply(repo, claude)
-        check("wrote all 8", rep["wrote"] == 8)
+        check("wrote all manifest files", rep["wrote"] == expected)
         check("no backup on fresh", rep["backup_dir"] is None)
         check("engine landed in hooks/", (claude / "hooks" / "kb.py").exists())
         check("sync landed in scripts/", (claude / "scripts" / "kb-sync.py").exists())
