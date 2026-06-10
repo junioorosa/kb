@@ -36,36 +36,36 @@ def make_vault(root: Path) -> Path:
     vault = root / "vault"
     learn = vault / "ws" / "proj" / "Learnings"
     learn.mkdir(parents=True)
-    (learn / "lock-oracle.md").write_text(
+    (learn / "jwt-clock-skew.md").write_text(
         "---\n"
-        "description: Lock por chave de negocio em integracao Oracle\n"
-        "tags: [lock, oracle, integracao]\n"
+        "description: Clock-skew tolerance for JWT expiry checks\n"
+        "tags: [jwt, auth, clock-skew]\n"
         "scope: project\n"
         "---\n"
-        "# Lock por chave\n"
-        "Serializa requests concorrentes pela chave de negocio. MARKER-LOCK-BODY\n"
-        "Ver [[etiqueta-amazon]].\n",
+        "# JWT clock skew\n"
+        "Compare now <= exp + SKEW so tokens are not read as expired early. MARKER-JWT-BODY\n"
+        "See [[rate-limit-retry]].\n",
         encoding="utf-8",
     )
-    (learn / "etiqueta-amazon.md").write_text(
+    (learn / "rate-limit-retry.md").write_text(
         "---\n"
-        "description: Etiqueta de transporte para Amazon com idempotencia\n"
-        "tags: [etiqueta, amazon]\n"
+        "description: Retry with backoff for rate-limited carrier API calls\n"
+        "tags: [retry, rate-limit]\n"
         "scope: project\n"
         "---\n"
-        "# Etiqueta Amazon\n"
-        "Gerar etiqueta uma vez so. MARKER-ETIQUETA-BODY\n",
+        "# Rate-limit retry\n"
+        "Generate the request once, retry with backoff. MARKER-RETRY-BODY\n",
         encoding="utf-8",
     )
     ws_learn = vault / "ws" / "Learnings"
     ws_learn.mkdir(parents=True)
-    (ws_learn / "metodo-curto.md").write_text(
+    (ws_learn / "short-methods.md").write_text(
         "---\n"
-        "description: Metodos longos quebrados em sub-metodos privados\n"
-        "tags: [sonar]\n"
+        "description: Long methods split into private sub-methods\n"
+        "tags: [lint]\n"
         "scope: workspace\n"
         "---\n"
-        "Regra de metodo curto.\n",
+        "Short-method rule.\n",
         encoding="utf-8",
     )
     ticket = vault / "ws" / "proj" / "fix" / "login"
@@ -76,7 +76,7 @@ def make_vault(root: Path) -> Path:
         "status: in-progress\n"
         "branch: fix/login\n"
         "---\n"
-        "Ticket do login. MARKER-TICKET-INDEX\n",
+        "Login ticket notes. MARKER-TICKET-INDEX\n",
         encoding="utf-8",
     )
     return vault
@@ -130,11 +130,11 @@ def main() -> int:
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-             "params": {"name": "kb_search", "arguments": {"query": "lock oracle integracao"}}},
+             "params": {"name": "kb_search", "arguments": {"query": "jwt clock skew expiry"}}},
             {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-             "params": {"name": "kb_context", "arguments": {"prompt": "lock oracle integracao"}}},
+             "params": {"name": "kb_context", "arguments": {"prompt": "jwt clock skew expiry"}}},
             {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-             "params": {"name": "kb_read", "arguments": {"path": "ws/proj/Learnings/lock-oracle.md"}}},
+             "params": {"name": "kb_read", "arguments": {"path": "ws/proj/Learnings/jwt-clock-skew.md"}}},
             {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
              "params": {"name": "kb_read", "arguments": {"path": "../../outside.md"}}},
             {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -145,7 +145,7 @@ def main() -> int:
             {"jsonrpc": "2.0", "id": 10, "method": "ping"},
             {"jsonrpc": "2.0", "id": 11, "method": "tools/call",
              "params": {"name": "kb_context",
-                        "arguments": {"prompt": "lock oracle integracao", "branch": "fix/login"}}},
+                        "arguments": {"prompt": "jwt clock skew expiry", "branch": "fix/login"}}},
             {"jsonrpc": "2.0", "id": 12, "method": "tools/call",
              "params": {"name": "kb_mark", "arguments": {"branch": "feat/from-codex", "cwd": "/repo/x"}}},
             {"jsonrpc": "2.0", "id": 13, "method": "tools/call",
@@ -175,21 +175,21 @@ def main() -> int:
         sr = by_id(responses, 3)
         stext = tool_text(sr)
         check("search not an error", not (sr.get("result") or {}).get("isError"), stext[:120])
-        check("search finds the lock note", "lock-oracle.md" in stext, stext[:200])
-        check("search ranks lock above etiqueta",
-              stext.find("lock-oracle.md") < (stext.find("etiqueta-amazon.md") if "etiqueta-amazon.md" in stext else len(stext)))
+        check("search finds the jwt note", "jwt-clock-skew.md" in stext, stext[:200])
+        check("search ranks jwt above retry",
+              stext.find("jwt-clock-skew.md") < (stext.find("rate-limit-retry.md") if "rate-limit-retry.md" in stext else len(stext)))
 
         print("test_kb_context")
         cr = by_id(responses, 4)
         ctext = tool_text(cr)
         check("context not an error", not (cr.get("result") or {}).get("isError"), ctext[:120])
         check("context emits vault-context block", "<vault-context>" in ctext)
-        check("context cites the lock note", "lock-oracle.md" in ctext)
+        check("context cites the jwt note", "jwt-clock-skew.md" in ctext)
 
         print("test_kb_read")
         rr = by_id(responses, 5)
         rtext = tool_text(rr)
-        check("read returns the body", "MARKER-LOCK-BODY" in rtext, rtext[:120])
+        check("read returns the body", "MARKER-JWT-BODY" in rtext, rtext[:120])
 
         print("test_kb_read_sandbox")
         esc = by_id(responses, 6)

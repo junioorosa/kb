@@ -1345,13 +1345,13 @@ pr:
    **Worth-saving test — the bar for ADDS (when in doubt, SKIP):**
    A learning earns its place ONLY if it carries what a strong model + the visible
    code/diff CANNOT regenerate. Ask "where else could this come from?":
-   - Nowhere but a human decision/fact — a magic constant's meaning (`202`=DEVOLUCAO),
-     a rule confirmed with a person/PR ("confirmado com a área fiscal…"; "Específico da
-     Amazon — PR #1084"), a deliberate trade-off + its rationale → SAVE (highest value).
+   - Nowhere but a human decision/fact — a magic constant's meaning (`202`=RETURN_ORDER),
+     a rule confirmed with a person/PR ("confirmed with the tax team…"; "specific to
+     this carrier's API — PR #1084"), a deliberate trade-off + its rationale → SAVE (highest value).
    - From the code but cross-file / hidden — existence + contract of a project util/hook
      (a Tuple-to-POJO mapper util, a canonical post-emission hook method), a naming
-     convention (a `*Ativos` DAO suffix), a stack-specific silent-fail gotcha (Jackson
-     reads `ativo` not `isAtivo`) → SAVE.
+     convention (an `*ActiveOnly` DAO suffix), a stack-specific silent-fail gotcha (Jackson
+     reads `active` not `isActive`) → SAVE.
    - Only from the model's general knowledge — a framework how-to it already emits
      (Chart.js dual axis, CSS `min-width:0`, "extract a value object"), a generic best
      practice → DO NOT SAVE (noise; it dilutes retrieval).

@@ -42,7 +42,7 @@ except Exception:
 # Vault resolution lives in the shared engine module (kb_config). Hook hot-path
 # uses strict=False: an unresolved vault yields None and main() degrades (emits
 # nothing) — it must NEVER raise into the prompt flow. The old hardcoded default
-# was exactly the "best guess" the ponto-sensível rule forbids; removing it and
+# was exactly the "best guess" the deterministic-key rule forbids; removing it and
 # refusing to guess is compliant.
 try:
     from kb_config import resolve_vault

@@ -1,7 +1,7 @@
 ﻿#!/usr/bin/env python3
 """End-to-end install test: the WIRED orchestrator producing a complete fresh host.
 
-This is the teammate use case the unit tests don't cover â€” run(apply=True) against
+This is the teammate use case the unit tests don't cover — run(apply=True) against
 an empty CLAUDE_CONFIG_DIR, deploying the REAL repo files. The scheduler is forced
 to dry-run: scheduler.register keys off a global task name (ClaudeKbSync), NOT the
 claude_dir, so a real register from a temp dir would repoint the live scheduled job

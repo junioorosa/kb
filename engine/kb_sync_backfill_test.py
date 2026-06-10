@@ -23,7 +23,7 @@ _spec.loader.exec_module(kb)
 
 EMAIL = "dev@x.com"
 SINCE = {"kind": "date", "iso": "2000-01-01", "source": "test"}
-CHANGE_MARKER = "ALTERA_SEPARACAO_CORREDOR_ALTERNATIVO"
+CHANGE_MARKER = "ALTERNATE_AISLE_PICKING_CHANGE"
 
 PASS, FAIL = 0, 0
 
@@ -71,7 +71,7 @@ def build_repo(root: Path) -> Path:
     # MERGED branch: own commit, then merged back into dev via a no-ff merge (PR-style),
     # so its commit is reachable from dev -> normal capture (--not dev) finds nothing.
     git(repo, "checkout", "-q", "-b", "fix/foo")
-    commit(repo, "feature.txt", CHANGE_MARKER + "\n", "fix: ajusta separacao por corredor")
+    commit(repo, "feature.txt", CHANGE_MARKER + "\n", "fix: route picking through the alternate aisle")
     git(repo, "checkout", "-q", "dev")
     git(repo, "merge", "--no-ff", "-q", "fix/foo", "-m", "Merged in fix/foo (PR #1)")
 
