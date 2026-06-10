@@ -61,8 +61,11 @@ DEDUPE_TTL = int(os.environ.get("KB_DEDUPE_TTL", "60"))
 # Hybrid tiers (score = α·cosine + β·BM25_norm, bounded ~[0, 1.3]). The tier is
 # the load-bearing decision: high injects the top-1 body excerpt, mid injects
 # links only, low collapses to "no strong match". Calibration (20-query eval +
-# live logs): on-topic top-1 lands ≥ 0.60; vague prompts cluster 0.32–0.53.
-HYBRID_HIGH_TIER = float(os.environ.get("KB_HYBRID_HIGH", "0.60"))
+# live logs): on-topic top-1 lands ≥ 0.90; a meta/conversational prompt has
+# reached 0.62 on a word-level coincidence — so high sits at 0.70: a wrong
+# excerpt pollutes every prompt, a missed one costs a single optional Read
+# (the mid links still carry the pointer).
+HYBRID_HIGH_TIER = float(os.environ.get("KB_HYBRID_HIGH", "0.70"))
 HYBRID_MID_TIER = float(os.environ.get("KB_HYBRID_MID", "0.45"))
 # BM25-only tiers (raw scores; daemon-down fallback. Raised post-eval: 3.0→5.0
 # kill false positives)

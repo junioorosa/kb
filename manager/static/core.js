@@ -11,7 +11,7 @@
  *   hybrid = (0.7*cosine + 0.3*BM25norm) * scope * status
  *   scope  = workspace 1.30 / project 1.20 / ticket 1.00 / index 1.05
  *   status = experimental 0.4 / discarded 0.0
- *   hybrid tiers: high >= 0.60, mid 0.45-0.60, low < 0.45 (BM25-only: 8.0 / 5.0)
+ *   hybrid tiers: high >= 0.70, mid 0.45-0.70, low < 0.45 (BM25-only: 8.0 / 5.0)
  *   model  = paraphrase-multilingual-MiniLM-L12-v2, 384d, offline (fastembed)
  *   daemon = 127.0.0.1:47821 (loopback)
  */
@@ -185,8 +185,8 @@
       '    </div>',
       '  </div>',
       '  <div class="tiers core-reveal" id="core-tiers">',
-      '    <div class="tier high" style="--w:1"><span class="tl">high</span><span class="tbar"><i></i></span><span class="tr">score ≥ 0.60 · injeta + excerpt do top-1</span></div>',
-      '    <div class="tier mid" style="--w:0.6"><span class="tl">mid</span><span class="tbar"><i></i></span><span class="tr">0.45 – 0.60 · injeta links</span></div>',
+      '    <div class="tier high" style="--w:1"><span class="tl">high</span><span class="tbar"><i></i></span><span class="tr">score ≥ 0.70 · injeta + excerpt do top-1</span></div>',
+      '    <div class="tier mid" style="--w:0.6"><span class="tl">mid</span><span class="tbar"><i></i></span><span class="tr">0.45 – 0.70 · injeta links</span></div>',
       '    <div class="tier low" style="--w:0.25"><span class="tl">low</span><span class="tbar"><i></i></span><span class="tr">&lt; 0.45 · fica de fora</span></div>',
       '  </div>',
       '  <p class="core-note">Daemon fora? cai pra BM25 puro com tiers por score absoluto (high 8.0 / mid 5.0). <b>GraphRAG 1-hop</b>: os 2 melhores puxam vizinhos via <span class="core-mono">[[wikilinks]]</span> entre os learnings.</p>',
