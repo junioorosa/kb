@@ -1,8 +1,10 @@
 # KB installer
 
 Topology A: this repo is the source of truth; the installer copies the engine +
-Claude Code adapter into your host (`~/.claude`) and wires the host up. One
-command does both first-install and updates — re-running is always safe.
+adapters into the live layout (`~/.claude` — the engine's current data dir) and
+wires the Claude Code hooks. One command does both first-install and updates —
+re-running is always safe. The MCP server deploys with the engine: point any
+MCP host at `<home>/.claude/hooks/kb.py mcp` (config snippets in the root README).
 
 ## Install / update
 

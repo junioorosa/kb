@@ -13,8 +13,10 @@
 KB captures engineering learnings **straight from your coding sessions and git history**,
 keyed to the unit of work (workspace → project → branch → learning), and injects the
 relevant ones back into your AI coding tool as on-prompt context. Knowledge is anchored to
-the SDLC — branch lifecycle, merge → resolved — not a flat memory blob. Claude Code works
-today; Codex and MCP clients are thin adapters on the same engine.
+the SDLC — branch lifecycle, merge → resolved — not a flat memory blob. The engine is
+host-agnostic and ships with two adapters: **Claude Code** (hooks — context is pushed into
+every prompt) and **MCP** (tools — any MCP host pulls the same engine: Codex CLI, Cursor,
+Claude Desktop, Windsurf, Zed...).
 
 ## Before / after
 
@@ -98,15 +100,55 @@ Flags (daily time, skip the manager auto-launch), status, and rollback are in
 
 ## Commands
 
-| Command | What it does |
-|---------|--------------|
-| `/kb-mark [branch]` | Mark the session's branch for capture (defaults to the current git branch). Flags: `--experimental`, `--done`, `--remove`. |
-| `/kb-search <query>` | Deep manual search across the vault's three scopes. |
-| `/kb-stats` | Token cost of the KB context injected into your prompts this session. |
-| `kb manage` | Open the localhost manager (vault path, schedule, integration toggle). |
-| `kb doctor` | Print the resolved config + vault, or fail loudly if unresolved. |
+| Command | Where | What it does |
+|---------|-------|--------------|
+| `/kb-mark [branch]` | Claude Code | Tie the session's transcript to a branch for capture (defaults to the current git branch). Flags: `--experimental`, `--done`, `--remove`. |
+| `/kb-search <query>` | Claude Code | Deep manual search across the vault's three scopes. |
+| `/kb-stats` | Claude Code | Token cost of the KB context injected into your prompts this session. |
+| `kb mark --done\|--experimental [branch]` | any terminal | Close or down-weight a ticket from anywhere — the host-neutral half of `/kb-mark`. |
+| `kb manage` | any terminal | Open the localhost manager (vault path, schedule, integration toggle). |
+| `kb doctor` | any terminal | Print the resolved config + vault, or fail loudly if unresolved. |
+| `kb mcp` | MCP hosts | Serve the KB over MCP stdio (configured once per host, see below). |
 
 Capture and finalize run as a **nightly job** registered at install — retime it in the manager.
+
+## Use it from any agent (MCP)
+
+Hosts without prompt hooks talk to the same local engine through MCP — the model **pulls**
+context instead of having it pushed. Three tools: `kb_search` (ranked notes), `kb_context`
+(the same block the hook injects), `kb_read` (one note's body, sandboxed to the vault).
+
+Point your host at the deployed CLI (`<home>/.claude/hooks/kb.py mcp`):
+
+```jsonc
+// Cursor (.cursor/mcp.json) / Claude Desktop (claude_desktop_config.json)
+{
+  "mcpServers": {
+    "kb": { "command": "python", "args": ["/home/you/.claude/hooks/kb.py", "mcp"] }
+  }
+}
+```
+
+```toml
+# Codex CLI (~/.codex/config.toml)
+[mcp_servers.kb]
+command = "python"
+args = ["/home/you/.claude/hooks/kb.py", "mcp"]
+```
+
+Tip for pull hosts: add a line to your agent instructions (e.g. `AGENTS.md`) such as
+*"before proposing a technical solution, call `kb_search` with the task"* — models
+under-call tools they're never reminded of.
+
+What you get per adapter today: **retrieval works everywhere** (it is fully local, no LLM).
+Conversation-enriched capture reads Claude Code transcripts; on other hosts the nightly sync
+still captures from **git alone** — same learnings, minus the conversation hints.
+
+And `/kb-mark`? Session marking exists to tie a **transcript** to a branch, so it belongs to
+the transcript-capturing adapter — on a host captured from git alone there is nothing to mark.
+The half that is branch-only — closing a ticket (`--done`) or down-weighting a dead end
+(`--experimental`) — works from any terminal via `kb mark`, and `kb_context` accepts your
+current branch to pull the ticket's notes on demand.
 
 ## Configuration
 
@@ -141,8 +183,8 @@ Python 3.x. Optional, installed by the bootstrap and all degrade gracefully if a
 ## Layout
 
 ```
-engine/     model/OS-agnostic core: kb_config, kb (CLI), kb_retrieve, kb-sync, kb-embed, kb-embed-daemon
-adapters/   per-host glue — claude-code/ (hooks + slash commands + statusline)
+engine/     host/OS-agnostic core: kb_config, kb (CLI), kb_retrieve, kb_mcp (MCP server), kb-sync, kb-embed, kb-embed-daemon
+adapters/   per-host glue — claude-code/ (hooks + slash commands + statusline); other hosts use `kb mcp`
 manager/    localhost config app (set vault, schedule, toggles)
 installer/  deploy/update + per-OS scheduler
 ```
