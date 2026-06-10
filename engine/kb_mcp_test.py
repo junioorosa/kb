@@ -146,6 +146,10 @@ def main() -> int:
             {"jsonrpc": "2.0", "id": 11, "method": "tools/call",
              "params": {"name": "kb_context",
                         "arguments": {"prompt": "lock oracle integracao", "branch": "fix/login"}}},
+            {"jsonrpc": "2.0", "id": 12, "method": "tools/call",
+             "params": {"name": "kb_mark", "arguments": {"branch": "feat/from-codex", "cwd": "/repo/x"}}},
+            {"jsonrpc": "2.0", "id": 13, "method": "tools/call",
+             "params": {"name": "kb_mark", "arguments": {}}},
         ]
         responses = run_server(home, vault, requests)
 
@@ -162,7 +166,7 @@ def main() -> int:
         tl = by_id(responses, 2)
         tools = (tl.get("result") or {}).get("tools") or []
         names = {t.get("name") for t in tools}
-        check("three tools", names == {"kb_search", "kb_context", "kb_read"}, str(names))
+        check("four tools", names == {"kb_search", "kb_context", "kb_read", "kb_mark"}, str(names))
         check("every tool has inputSchema", all(t.get("inputSchema") for t in tools))
         check("search description is prescriptive (when-to-call)",
               "BEFORE proposing" in next((t["description"] for t in tools if t["name"] == "kb_search"), ""))
@@ -197,6 +201,21 @@ def main() -> int:
         cb = by_id(responses, 11)
         cbt = tool_text(cb)
         check("branch arg pulls the ticket block", "fix/login" in cbt and "Fix login timeout" in cbt, cbt[:200])
+
+        print("test_kb_mark_mcp_tool")
+        mkres = by_id(responses, 12)
+        mktext = tool_text(mkres)
+        check("kb_mark not an error", not (mkres.get("result") or {}).get("isError"), mktext[:120])
+        check("result carries a KB-MARK token", "KB-MARK:feat/from-codex:" in mktext)
+        mcp_sidecars = list((home / ".claude" / "state").glob("kb-session-branch-mcp-*.json"))
+        check("writes one mcp sidecar", len(mcp_sidecars) == 1)
+        mdata = json.loads(mcp_sidecars[0].read_text(encoding="utf-8")) if mcp_sidecars else {}
+        check("sidecar token matches the returned token",
+              bool(mdata.get("mark_token")) and mdata.get("mark_token", "") in mktext
+              and mdata.get("branch") == "feat/from-codex")
+        check("sidecar keeps the cwd", mdata.get("cwd") == "/repo/x")
+        mkbad = by_id(responses, 13)
+        check("kb_mark without branch is a tool error", (mkbad.get("result") or {}).get("isError") is True)
 
         print("test_kb_mark_cli")
         env = os.environ.copy()

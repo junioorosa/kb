@@ -115,8 +115,9 @@ Capture and finalize run as a **nightly job** registered at install — retime i
 ## Use it from any agent (MCP)
 
 Hosts without prompt hooks talk to the same local engine through MCP — the model **pulls**
-context instead of having it pushed. Three tools: `kb_search` (ranked notes), `kb_context`
-(the same block the hook injects), `kb_read` (one note's body, sandboxed to the vault).
+context instead of having it pushed. Four tools: `kb_search` (ranked notes), `kb_context`
+(the same block the hook injects), `kb_read` (one note's body, sandboxed to the vault) and
+`kb_mark` (tie the session to a branch for capture — see below).
 
 Point your host at the deployed CLI (`<home>/.claude/hooks/kb.py mcp`):
 
@@ -140,13 +141,19 @@ Tip for pull hosts: add a line to your agent instructions (e.g. `AGENTS.md`) suc
 *"before proposing a technical solution, call `kb_search` with the task"* — models
 under-call tools they're never reminded of.
 
-What you get per adapter today: **retrieval works everywhere** (it is fully local, no LLM).
-Conversation-enriched capture reads Claude Code transcripts; on other hosts the nightly sync
-still captures from **git alone** — same learnings, minus the conversation hints.
+What you get per adapter today: **retrieval works everywhere** (it is fully local, no LLM),
+and **conversation capture works on any host that persists its session logs** — which is how
+`kb_mark` pulls it off:
 
-And `/kb-mark`? Session marking exists to tie a **transcript** to a branch, so it belongs to
-the transcript-capturing adapter — on a host captured from git alone there is nothing to mark.
-The half that is branch-only — closing a ticket (`--done`) or down-weighting a dead end
+1. You (or the model, when you ask it to) call `kb_mark` with the branch you're working on.
+2. The tool returns a **mark token** — and since the host persists tool results in its own
+   session log, the token is now literally written inside that session's file.
+3. The nightly sync greps the configured `transcript_stores` (default: `~/.codex/sessions`)
+   for the token. The file that contains it **is** the marked session — a deterministic key,
+   no host session-id needed, no guessing. `.jsonl.zst` logs are mirrored decompressed.
+
+A session never marked still gets captured from **git alone** — same learnings, minus the
+conversation hints. Ticket maintenance — closing (`--done`) or down-weighting
 (`--experimental`) — works from any terminal via `kb mark`, and `kb_context` accepts your
 current branch to pull the ticket's notes on demand.
 
