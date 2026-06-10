@@ -182,9 +182,45 @@ def test_pre011_migration():
             check("second run migrates nothing", rep2["migrate"].get("needed") is False)
 
 
+def test_manager_launch_decision():
+    """maybe_launch_manager closes the first-install loop: it opens the manager
+    ONLY when an apply left the machine unconfigured. Spawn is injected — the
+    real manager never starts inside the test suite."""
+    print("test_manager_launch_decision")
+    calls = []
+
+    def spawn(cmd):
+        calls.append(cmd)
+
+    def boom(cmd):
+        raise OSError("no display")
+
+    base = {"mode": "apply", "config": {"present": False}}
+    rep = install.maybe_launch_manager(base, spawn=spawn)
+    check("first install launches", rep["launched"] is True and len(calls) == 1)
+    check("spawn targets the repo manager", calls and calls[0][1].endswith("server.py"))
+
+    calls.clear()
+    rep = install.maybe_launch_manager({"mode": "apply", "config": {"present": True}}, spawn=spawn)
+    check("configured machine stays quiet", rep["launched"] is False and not calls
+          and rep["reason"] == "already configured")
+
+    rep = install.maybe_launch_manager({"mode": "dry-run", "config": {"present": False}}, spawn=spawn)
+    check("dry-run never launches", rep["launched"] is False and not calls)
+
+    rep = install.maybe_launch_manager(base, no_manager=True, spawn=spawn)
+    check("--no-manager opts out", rep["launched"] is False and not calls
+          and "opted out" in rep["reason"])
+
+    rep = install.maybe_launch_manager(base, spawn=boom)
+    check("spawn failure degrades to a reason", rep["launched"] is False
+          and "launch failed" in rep["reason"])
+
+
 def main():
     test_fresh_host_install()
     test_pre011_migration()
+    test_manager_launch_decision()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

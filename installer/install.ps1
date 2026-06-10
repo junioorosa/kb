@@ -11,6 +11,7 @@
 #Requires -Version 5.1
 param(
     [switch]$Apply,
+    [switch]$NoManager,
     [string]$Time = "01:00"
 )
 $ErrorActionPreference = "Stop"
@@ -59,6 +60,7 @@ try {
 $installPy = Join-Path $InstallerDir "install.py"
 $callArgs = $PyArgs + @($installPy, "--time", $Time)
 if ($Apply) { $callArgs += "--apply" }
+if ($NoManager) { $callArgs += "--no-manager" }
 
 Write-Host ""
 & $PyExe @callArgs
@@ -76,5 +78,5 @@ if ($code -ne 0) {
 }
 
 Write-Host ""
-Write-Host "Done. Press the Windows key and type 'KB Manager' to open the config UI." -ForegroundColor Green
+Write-Host "Done. On a first install the manager opens by itself; any other time, press the Windows key and type 'KB Manager'." -ForegroundColor Green
 exit $code

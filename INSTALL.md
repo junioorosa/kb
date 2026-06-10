@@ -48,7 +48,9 @@ install from `~/.claude` to `~/.kb`, deploys the engine into `~/.kb/engine`,
 merges the Claude Code hooks into `settings.json`
 (additively — foreign hooks untouched), wires the KB MCP server into every
 detected host (Codex / Cursor / Claude Desktop / Gemini / Windsurf; skip with
-`--no-mcp-wire`), registers the nightly sync job, stamps the version.
+`--no-mcp-wire`), registers the nightly sync job, stamps the version. On a
+first install (no config yet) it also opens the manager in the user's browser —
+that's expected, hand the user over to it for step 3 (`--no-manager` to skip).
 
 Run without `--apply` first if the user wants to review: it prints the full
 diff and writes nothing.

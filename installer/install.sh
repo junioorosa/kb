@@ -12,10 +12,12 @@ set -euo pipefail
 
 TIME="01:00"
 APPLY=""
+NOMANAGER=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --apply) APPLY="--apply"; shift ;;
         --time)  TIME="$2"; shift 2 ;;
+        --no-manager) NOMANAGER="--no-manager"; shift ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -42,7 +44,7 @@ fi
 # --- Hand off to the orchestrator -------------------------------------------
 echo ""
 # shellcheck disable=SC2086
-"$PY" "$HERE/install.py" --time "$TIME" $APPLY
+"$PY" "$HERE/install.py" --time "$TIME" $APPLY $NOMANAGER
 code=$?
 
 if [ -z "$APPLY" ]; then
@@ -55,5 +57,5 @@ if [ "$code" -ne 0 ]; then
     exit $code
 fi
 echo ""
-echo "Done. Search your apps (Spotlight / app launcher) for 'KB Manager' to open the config UI."
+echo "Done. On a first install the manager opens by itself; any other time, search your apps for 'KB Manager'."
 exit $code

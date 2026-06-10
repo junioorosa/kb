@@ -88,8 +88,9 @@ bash installer/install.sh --apply
 
 That wires the Claude Code hooks, **wires the KB MCP server into every detected host**
 (Codex CLI, Cursor, Claude Desktop, Gemini CLI, Windsurf — additively, backed up, skippable
-with `--no-mcp-wire`), registers a daily capture job, and opens the manager so you can point
-KB at your vault and code folders. Requirements: **Python 3.x** (the bootstrap also installs
+with `--no-mcp-wire`), registers a daily capture job — and on a **first install** (no config
+yet) opens the manager in your browser so you finish by pointing KB at your vault and code
+folders (`--no-manager` to skip; updates never auto-open it). Requirements: **Python 3.x** (the bootstrap also installs
 the optional `fastembed`, `numpy`, `tiktoken` — see [Requirements](#requirements)).
 
 Flags (daily time, skip the manager auto-launch), status, and rollback are in

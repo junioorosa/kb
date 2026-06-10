@@ -185,6 +185,48 @@ def step_shortcut(apply: bool) -> dict:
     return shortcut.create_shortcut(REPO_ROOT, dry_run=not apply)
 
 
+def maybe_launch_manager(report: dict, no_manager: bool = False, spawn=None) -> dict:
+    """First-install closer: when an APPLY left the machine unconfigured (no
+    vault yet), open the manager so the install flows straight into "point KB
+    at your vault" instead of ending on a hint. Deliberately NOT part of run():
+    update_apply() reuses run() from inside the manager itself — auto-launching
+    there would spawn a second manager on every update.
+
+    An already-configured machine never auto-opens (updates stay quiet).
+    `spawn` is injectable for tests; the default detaches the real manager.
+    """
+    rep = {"launched": False, "reason": None}
+    if no_manager:
+        rep["reason"] = "opted out (--no-manager)"
+        return rep
+    if report.get("mode") != "apply":
+        rep["reason"] = "dry-run"
+        return rep
+    if (report.get("config") or {}).get("present"):
+        rep["reason"] = "already configured"
+        return rep
+    server = REPO_ROOT / "manager" / "server.py"
+    if not server.exists():
+        rep["reason"] = "manager not found in this clone"
+        return rep
+    if spawn is None:
+        def spawn(cmd):  # pragma: no cover - exercised by hand, not in tests
+            kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                      "stderr": subprocess.DEVNULL, "close_fds": True}
+            if os.name == "nt":
+                kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000
+            else:
+                kwargs["start_new_session"] = True
+            subprocess.Popen(cmd, **kwargs)
+    try:
+        spawn([sys.executable, str(server)])
+        rep["launched"] = True
+        rep["reason"] = "first install — set your vault in the browser tab that just opened"
+    except Exception as e:
+        rep["reason"] = f"launch failed: {e}"
+    return rep
+
+
 def step_version(kdir: Path, apply: bool) -> dict:
     rep = {"from": installed_version(kdir), "to": repo_version()}
     if apply:
@@ -646,6 +688,8 @@ if __name__ == "__main__":
     ap.add_argument("--skip-scheduler", action="store_true", help="install everything but don't touch the OS scheduler")
     ap.add_argument("--skip-shortcut", action="store_true", help="install everything but don't create the desktop shortcut")
     ap.add_argument("--no-mcp-wire", action="store_true", help="don't write the KB MCP server into other hosts' configs")
+    ap.add_argument("--no-manager", action="store_true",
+                    help="don't auto-open the manager after a first install (it only opens when no config exists yet)")
     ap.add_argument("--json", action="store_true", help="emit raw JSON report")
     args = ap.parse_args()
 
@@ -671,7 +715,13 @@ if __name__ == "__main__":
         mcpw = False if args.no_mcp_wire else None
         out = run(apply=args.apply, time_hhmm=args.time, scheduler_apply=sched,
                   shortcut_apply=shortc, mcp_apply=mcpw)
+        # CLI-only on purpose: run() is also reused by update_apply() from
+        # inside the manager, where auto-launching would spawn a second one.
+        out["manager"] = maybe_launch_manager(out, no_manager=args.no_manager)
         if args.json:
             print(json.dumps(out, indent=2))
         else:
             print(_summary(out))
+            mgr = out["manager"]
+            if mgr.get("launched"):
+                print("  manager  : opening in your browser — set the vault path there to finish.")
