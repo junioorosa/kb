@@ -187,6 +187,11 @@ Point KB at your vault and your code folders. Two ways:
   `workspaces`. The vault is resolved by `kb_config` from `KB_VAULT` (env) or the config's `vault`
   key — never hardcoded, never guessed.
 
+**Browsing your knowledge:** the manager's Knowledge tab reads, searches and filters the vault out
+of the box. The vault is also plain markdown with `[[wikilinks]]`, so any markdown tool works on it —
+[Obsidian](https://obsidian.md) is a great fit: open the vault folder as an Obsidian vault and you
+get the graph view, backlinks and full-text navigation over your learnings for free.
+
 ## Your data stays local
 
 KB is built so your knowledge never leaves your machine by accident:
