@@ -11,9 +11,10 @@ One command for first-install AND "update certinho":
 Steps (each idempotent, each safe to re-run):
   1. deploy      engine + adapter files into ~/.claude (diff -> backup -> copy)
   2. settings    merge KB hooks into settings.json (additive, never clobbers)
-  3. scheduler   register the daily kb-sync job (per-OS)
-  4. version     stamp ~/.claude/.kb-version with the repo's VERSION
-  5. config      check kb-workspaces.json; never fabricate a vault path
+  3. mcp         wire the KB MCP server into detected hosts (codex/cursor/...)
+  4. scheduler   register the daily kb-sync job (per-OS)
+  5. version     stamp ~/.claude/.kb-version with the repo's VERSION
+  6. config      check kb-workspaces.json; never fabricate a vault path
 
 The per-OS bootstrap scripts (install.ps1 / install.sh) only ensure Python + deps
 exist, then call this. Everything load-bearing lives here so all hosts agree.
@@ -33,6 +34,7 @@ REPO_ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 import deploy            # noqa: E402
+import mcp_wire          # noqa: E402
 import scheduler         # noqa: E402
 import shortcut          # noqa: E402
 from settings_merge import merge_settings, SettingsMergeError  # noqa: E402
@@ -68,6 +70,10 @@ def step_settings(cdir: Path, apply: bool) -> dict:
         return merge_settings(cdir / "settings.json", cdir, dry_run=not apply)
     except SettingsMergeError as e:
         return {"error": str(e)}
+
+
+def step_mcp(cdir: Path, apply: bool) -> dict:
+    return mcp_wire.wire_all(cdir, dry_run=not apply)
 
 
 def step_scheduler(cdir: Path, apply: bool, time_hhmm: str) -> dict:
@@ -113,7 +119,7 @@ def step_config(cdir: Path) -> dict:
 # --- Orchestration -----------------------------------------------------------
 
 def run(apply: bool, time_hhmm: str, scheduler_apply: bool | None = None,
-        shortcut_apply: bool | None = None) -> dict:
+        shortcut_apply: bool | None = None, mcp_apply: bool | None = None) -> dict:
     cdir = claude_dir()
     # The scheduler keys off a global task name, not claude_dir; `scheduler_apply`
     # lets a caller install everything else while leaving the schedule untouched
@@ -124,6 +130,10 @@ def run(apply: bool, time_hhmm: str, scheduler_apply: bool | None = None,
     # lets the E2E test exercise everything else without littering the live Desktop.
     if shortcut_apply is None:
         shortcut_apply = apply
+    # MCP wiring writes to OTHER hosts' config files (real HOME, not claude_dir);
+    # `mcp_apply` lets tests and `--skip-mcp-wire` leave them untouched.
+    if mcp_apply is None:
+        mcp_apply = apply
     report = {
         "mode": "apply" if apply else "dry-run",
         "repo": str(REPO_ROOT),
@@ -131,6 +141,7 @@ def run(apply: bool, time_hhmm: str, scheduler_apply: bool | None = None,
         "version": {"from": installed_version(cdir), "to": repo_version()},
         "deploy": step_deploy(cdir, apply),
         "settings": step_settings(cdir, apply),
+        "mcp": step_mcp(cdir, mcp_apply),
         "scheduler": step_scheduler(cdir, scheduler_apply, time_hhmm),
         "shortcut": step_shortcut(shortcut_apply),
         "config": step_config(cdir),
@@ -464,6 +475,17 @@ def _summary(rep: dict) -> str:
     else:
         lines.append(f"  settings : +{len(s.get('added', []))} added, {len(s.get('skipped', []))} present"
                      + (f", backup {s['backup']}" if s.get("backup") else ""))
+    m = rep.get("mcp") or {}
+    hosts = m.get("hosts", {})
+    wired = [n for n, r in hosts.items() if r.get("status") in ("wired", "would-wire")]
+    present = [n for n, r in hosts.items() if r.get("status") == "already"]
+    problems = [n for n, r in hosts.items() if r.get("status") in ("refused-malformed", "error")]
+    detected = [n for n, r in hosts.items() if r.get("status") != "not-detected"]
+    desc = (f"{len(detected)} host(s) detected"
+            + (f", wired: {', '.join(wired)}" if wired else "")
+            + (f", present: {', '.join(present)}" if present else "")
+            + (f", PROBLEM: {', '.join(problems)}" if problems else ""))
+    lines.append(f"  mcp      : {desc}")
     sc = rep["scheduler"]
     lines.append(f"  scheduler: {sc.get('os')} task '{sc.get('task', 'kb-sync')}' "
                  + ("registered" if sc.get("registered") else f"@ {sc.get('time')} (dry-run)"))
@@ -493,6 +515,7 @@ if __name__ == "__main__":
     ap.add_argument("--time", default=scheduler.DEFAULT_TIME, help="daily kb-sync time HH:MM (default 01:00)")
     ap.add_argument("--skip-scheduler", action="store_true", help="install everything but don't touch the OS scheduler")
     ap.add_argument("--skip-shortcut", action="store_true", help="install everything but don't create the desktop shortcut")
+    ap.add_argument("--no-mcp-wire", action="store_true", help="don't write the KB MCP server into other hosts' configs")
     ap.add_argument("--json", action="store_true", help="emit raw JSON report")
     args = ap.parse_args()
 
@@ -515,7 +538,9 @@ if __name__ == "__main__":
     else:
         sched = False if args.skip_scheduler else None
         shortc = False if args.skip_shortcut else None
-        out = run(apply=args.apply, time_hhmm=args.time, scheduler_apply=sched, shortcut_apply=shortc)
+        mcpw = False if args.no_mcp_wire else None
+        out = run(apply=args.apply, time_hhmm=args.time, scheduler_apply=sched,
+                  shortcut_apply=shortc, mcp_apply=mcpw)
         if args.json:
             print(json.dumps(out, indent=2))
         else:

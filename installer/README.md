@@ -51,12 +51,18 @@ them). All the real work is in the OS-agnostic orchestrator `install.py`.
    hooks (other tools) are never touched; an unparseable `settings.json` is left
    untouched and the install refuses rather than risk clobbering it. Backs up
    before writing.
-3. **scheduler** — registers the daily `kb-sync` job (Windows Task Scheduler /
+3. **mcp** — wires the KB MCP server into every **detected** host (Codex CLI,
+   Cursor, Claude Desktop, Gemini CLI, Windsurf). Same contract as settings:
+   additive, an existing `kb` entry is never overwritten, malformed configs are
+   refused untouched, every modified file gets a `*.kb-bak-<ts>` sibling. The
+   recorded command uses the absolute Python path (GUI hosts spawn MCP servers
+   without your shell PATH). Skip entirely with `--no-mcp-wire`.
+4. **scheduler** — registers the daily `kb-sync` job (Windows Task Scheduler /
    macOS launchd / Linux cron).
-4. **version** — stamps `~/.claude/.kb-version` with this repo's `VERSION`, and
+5. **version** — stamps `~/.claude/.kb-version` with this repo's `VERSION`, and
    records the clone path in `~/.claude/.kb-source` so `kb manage` can find the
    manager (which runs from the clone).
-5. **config** — checks `~/.claude/kb-workspaces.json`. It never fabricates a
+6. **config** — checks `~/.claude/kb-workspaces.json`. It never fabricates a
    vault path; if the config is missing it tells you to set `vault` yourself
    (copy `config.example.json`). KB hooks degrade safely (no injection) until then.
 

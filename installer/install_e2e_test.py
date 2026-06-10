@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """End-to-end install test: the WIRED orchestrator producing a complete fresh host.
 
-This is the teammate use case the unit tests don't cover — run(apply=True) against
+This is the teammate use case the unit tests don't cover â€” run(apply=True) against
 an empty CLAUDE_CONFIG_DIR, deploying the REAL repo files. The scheduler is forced
 to dry-run: scheduler.register keys off a global task name (ClaudeKbSync), NOT the
 claude_dir, so a real register from a temp dir would repoint the live scheduled job
@@ -41,13 +41,15 @@ def test_fresh_host_install():
         try:
             # Wired orchestrator, real apply, scheduler + shortcut held to dry-run
             # (footgun guard: both touch global state outside the temp claude_dir).
-            rep = install.run(apply=True, time_hhmm="01:00", scheduler_apply=False, shortcut_apply=False)
+            rep = install.run(apply=True, time_hhmm="01:00", scheduler_apply=False, shortcut_apply=False, mcp_apply=False)
 
             check("claude_dir is the temp dir", rep["claude_dir"] == str(cdir))
 
-            # deploy: all 18 manifest files written into a fresh host
+            # deploy: every manifest file written into a fresh host
+            import deploy as _deploy
+            expected = len(_deploy.deploy_pairs(install.REPO_ROOT, cdir))
             dep = rep["deploy"]
-            check("deploy wrote 18", dep.get("wrote") == 18)
+            check("deploy wrote the whole manifest", dep.get("wrote") == expected)
             check("engine kb.py in hooks/", (cdir / "hooks" / "kb.py").exists())
             check("kb_config.py in hooks/", (cdir / "hooks" / "kb_config.py").exists())
             check("kb-sync.py in scripts/", (cdir / "scripts" / "kb-sync.py").exists())
@@ -79,7 +81,7 @@ def test_fresh_host_install():
             check("no kb-workspaces.json created", not (cdir / "kb-workspaces.json").exists())
 
             # idempotency: a second wired apply changes nothing
-            rep2 = install.run(apply=True, time_hhmm="01:00", scheduler_apply=False, shortcut_apply=False)
+            rep2 = install.run(apply=True, time_hhmm="01:00", scheduler_apply=False, shortcut_apply=False, mcp_apply=False)
             check("second apply deploys 0", rep2["deploy"].get("wrote") == 0)
             check("second apply adds 0 settings", len(rep2["settings"].get("added", [])) == 0)
         finally:
