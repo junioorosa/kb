@@ -113,7 +113,7 @@ def test_recognizes_localized_variant():
                 "UserPromptSubmit": [
                     {"hooks": [
                         {"type": "command", "command": f'bash "{h}/hooks/kb-context.sh"',
-                         "timeout": 99, "statusMessage": "KB: rerank cross-ticket (PT)..."},
+                         "timeout": 99, "statusMessage": "KB: recall cross-ticket (PT)..."},
                     ]}
                 ],
             },

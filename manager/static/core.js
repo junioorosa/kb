@@ -11,7 +11,7 @@
  *   hybrid = (0.7*cosine + 0.3*BM25norm) * scope * status
  *   scope  = workspace 1.30 / project 1.20 / ticket 1.00 / index 1.05
  *   status = experimental 0.4 / discarded 0.0
- *   Haiku tiers: high >= 0.75, mid 0.45-0.75, low < 0.45
+ *   hybrid tiers: high >= 0.60, mid 0.45-0.60, low < 0.45 (BM25-only: 8.0 / 5.0)
  *   model  = paraphrase-multilingual-MiniLM-L12-v2, 384d, offline (fastembed)
  *   daemon = 127.0.0.1:47821 (loopback)
  */
@@ -72,7 +72,7 @@
       '<section class="core-section" id="core-flow-sec">',
       '  <div class="core-reveal"><div class="core-kicker">o que acontece quando você envia um prompt</div>',
       '  <h2 class="core-h">O fluxo do recall, passo a passo</h2>',
-      '  <p class="core-lead">Antes do LLM ver uma palavra, um hook (<span class="hl">UserPromptSubmit</span>) intercepta seu prompt e roda esta pipeline. Tudo local, em milissegundos — só o rerank é uma chamada de API, e mesmo ela tem plano B.</p></div>',
+      '  <p class="core-lead">Antes do LLM ver uma palavra, um hook (<span class="hl">UserPromptSubmit</span>) intercepta seu prompt e roda esta pipeline. Tudo local — <b>nenhuma chamada de API</b> no caminho do seu prompt.</p></div>',
       '  <div class="flow-wrap core-reveal">',
       '    <div class="flow-head">',
       '      <span class="core-note" style="border:none;padding:0;margin:0">simulação — não é tempo real</span>',
@@ -97,18 +97,15 @@
       '      <div class="flow-row">',
       '        <div class="flow-stage" data-order="7" style="--sc:var(--core-cyan)"><div class="fs-i">⚖️</div><div class="fs-t">híbrido</div><div class="fs-s">(0.7·cos + 0.3·bm25)×pesos</div></div>',
       '        <div class="flow-conn" data-order="8"></div>',
-      '        <div class="flow-stage" data-order="9" style="--sc:var(--core-violet)"><div class="fs-i">🧠</div><div class="fs-t">rerank</div><div class="fs-s">Haiku top 5 · API → cai p/ BM25</div></div>',
-      '        <div class="flow-conn" data-order="10"></div>',
-      '        <div class="flow-stage" data-order="11" style="--sc:var(--green)"><div class="fs-i">🎚️</div><div class="fs-t">tiers</div><div class="fs-s">high/mid/low + GraphRAG 1-hop</div></div>',
+      '        <div class="flow-stage" data-order="9" style="--sc:var(--green)"><div class="fs-i">🎚️</div><div class="fs-t">tiers</div><div class="fs-s">high/mid/low + GraphRAG 1-hop</div></div>',
       '      </div>',
-      '      <div class="flow-out" data-order="12">',
+      '      <div class="flow-out" data-order="10">',
       '        <div class="flow-out-head">✓ injetado no seu prompt</div>',
-      '        <pre><span class="m">&lt;vault-context&gt;</span>\n## Top matches (tier=<span class="v">high</span>, via Haiku rerank):\n- <span class="k">[[...idempotencia-gerar-pedido.md]]</span> (conf=0.85)\n    "guard contra duplicidade ao gerar pedido…"\n## Related (GraphRAG 1-hop):\n- <span class="k">[[...unique-constraint-defense.md]]</span>\n<span class="m">&lt;/vault-context&gt;</span></pre>',
+      '        <pre><span class="m">&lt;vault-context&gt;</span>\n## Top matches (tier=<span class="v">high</span>, via hybrid embedding (cosine+BM25)):\n- <span class="k">[[...idempotencia-gerar-pedido.md]]</span> (score=0.85)\n    "guard contra duplicidade ao gerar pedido…"\n## Related (GraphRAG 1-hop):\n- <span class="k">[[...unique-constraint-defense.md]]</span>\n<span class="m">&lt;/vault-context&gt;</span></pre>',
       '      </div>',
       '      <div class="flow-latency">',
       '        <span><b>daemon up:</b> cosine + BM25 híbrido</span>',
       '        <span><b>daemon down:</b> BM25 puro (degrada, não quebra)</span>',
-      '        <span><b>API down:</b> tiers por score BM25</span>',
       '      </div>',
       '    </div>',
       '  </div>',
@@ -170,7 +167,7 @@
       '<section class="core-section">',
       '  <div class="core-reveal"><div class="core-kicker">como tudo se combina</div>',
       '  <h2 class="core-h">Score híbrido, pesos e tiers</h2>',
-      '  <p class="core-lead">As duas pistas viram um número só, ajustado por <b>quão geral</b> é o conhecimento e <b>quão confiável</b> é o ticket. Depois o Haiku reordena os finalistas e decide quanto injeta.</p></div>',
+      '  <p class="core-lead">As duas pistas viram um número só, ajustado por <b>quão geral</b> é o conhecimento e <b>quão confiável</b> é o ticket. O tier do top-1 decide quanto injeta: <b>high</b> leva o excerpt do corpo, <b>mid</b> só os links.</p></div>',
       '  <div class="formula-box core-reveal">',
       '    <div class="formula"><span class="term t-scope">scope</span><span class="op">×</span><span class="term t-status">status</span><span class="op">×</span>(<span class="op"> </span><span class="term t-cos">0.7 · cosine</span><span class="op">+</span><span class="term t-bm">0.3 · BM25ₙ</span><span class="op"> </span>)</div>',
       '    <div class="formula-legend">',
@@ -188,8 +185,8 @@
       '    </div>',
       '  </div>',
       '  <div class="tiers core-reveal" id="core-tiers">',
-      '    <div class="tier high" style="--w:1"><span class="tl">high</span><span class="tbar"><i></i></span><span class="tr">conf ≥ 0.75 · injeta forte</span></div>',
-      '    <div class="tier mid" style="--w:0.6"><span class="tl">mid</span><span class="tbar"><i></i></span><span class="tr">0.45 – 0.75 · injeta</span></div>',
+      '    <div class="tier high" style="--w:1"><span class="tl">high</span><span class="tbar"><i></i></span><span class="tr">score ≥ 0.60 · injeta + excerpt do top-1</span></div>',
+      '    <div class="tier mid" style="--w:0.6"><span class="tl">mid</span><span class="tbar"><i></i></span><span class="tr">0.45 – 0.60 · injeta links</span></div>',
       '    <div class="tier low" style="--w:0.25"><span class="tl">low</span><span class="tbar"><i></i></span><span class="tr">&lt; 0.45 · fica de fora</span></div>',
       '  </div>',
       '  <p class="core-note">Daemon fora? cai pra BM25 puro com tiers por score absoluto (high 8.0 / mid 5.0). <b>GraphRAG 1-hop</b>: os 2 melhores puxam vizinhos via <span class="core-mono">[[wikilinks]]</span> entre os learnings.</p>',
@@ -223,9 +220,9 @@
       '  <div class="core-reveal"><div class="core-kicker">as garantias</div>',
       '  <h2 class="core-h">Princípios que seguram tudo</h2></div>',
       '  <div class="principles core-reveal">',
-      '    <div class="principle"><div class="pr-i">🔒</div><h4>Privado por construção</h4><p>O vault é git <b>local, sem remoto, nunca</b>. Embeddings e BM25 rodam na sua máquina. Só o rerank opcional fala com API.</p></div>',
+      '    <div class="principle"><div class="pr-i">🔒</div><h4>Privado por construção</h4><p>O vault é git <b>local, sem remoto, nunca</b>. Embeddings e BM25 rodam na sua máquina — o recall não fala com nenhuma API.</p></div>',
       '    <div class="principle"><div class="pr-i">🎯</div><h4>Determinístico</h4><p>Chave vem do payload. Nunca <code>"mais recente / melhor palpite"</code> — um fallback errado envenenaria consultas futuras.</p></div>',
-      '    <div class="principle"><div class="pr-i">🪂</div><h4>Degrada com graça</h4><p>Daemon cai → BM25 puro. API cai → tiers por score. Cada camada tem plano B; o recall <b>nunca quebra</b> o prompt.</p></div>',
+      '    <div class="principle"><div class="pr-i">🪂</div><h4>Degrada com graça</h4><p>Daemon cai → BM25 puro. Vault não resolve → silencia. Cada camada tem plano B; o recall <b>nunca quebra</b> o prompt.</p></div>',
       '    <div class="principle"><div class="pr-i">🧱</div><h4>Agnóstico</h4><p>OS (<code>schtasks/launchd/cron</code>), modelo (Claude/Codex via adapter), repo (zero path hardcoded). Núcleo + adapter fino.</p></div>',
       '  </div>',
       '</section>',

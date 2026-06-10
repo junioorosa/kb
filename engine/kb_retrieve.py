@@ -1,23 +1,22 @@
 #!/usr/bin/env python
 """
-kb_retrieve.py — KB context injection (two-stage retrieval).
+kb_retrieve.py — KB context injection (hybrid retrieval).
 
 Pipeline:
-  1. BM25 lexical over manifest (top 20 candidates).
-  2. Haiku rerank with confidence + reasoning (top 5).
-  3. GraphRAG 1-hop expansion via Obsidian [[wikilinks]] from top 2.
-  4. Tier emission (high/mid/low) based on top-1 confidence.
+  1. Hybrid retrieval: cosine (kb-embed-daemon) + normalized BM25, fused with
+     scope/status weights. Degrades to pure BM25 when the daemon is down.
+  2. GraphRAG 1-hop expansion via [[wikilinks]] from the top 2.
+  3. Tier emission (high/mid/low) from the top-1 score — high injects a body
+     excerpt of the best match, mid injects links only.
 
 Additive: if branch matches a canonical ticket folder, inject that ticket's
 frontmatter + ticket-level learnings (preserves former Path A behavior).
 
 Safety:
   - Kill-switch checked by parent shell hook.
-  - Daily cap on Haiku calls (KB_HAIKU_DAILY_CAP, default 150).
   - Prompt-hash dedupe (60s) to skip duplicate consecutive prompts.
-  - Hard timeout on Haiku (KB_HAIKU_TIMEOUT, default 3s).
-  - Fallback to BM25-only when Haiku fails / over cap / times out.
-  - Output budget guard (KB_BUDGET_BYTES, default 8000).
+  - Output budget guard (KB_BUDGET_BYTES, default 15000).
+  - Fully local hot path: no network call besides the loopback daemon.
 """
 import sys
 import os
@@ -28,8 +27,6 @@ import glob
 import hashlib
 import subprocess
 import unicodedata
-import urllib.request
-import urllib.error
 from pathlib import Path
 from math import log
 
@@ -56,28 +53,19 @@ HOME = Path(os.environ.get("HOME", os.path.expanduser("~")))
 CACHE_DIR = HOME / ".claude" / "cache"
 LOG_DIR = HOME / ".claude" / "logs"
 MANIFEST = CACHE_DIR / "kb-manifest.json"
-DAILY_COUNT_FILE = HOME / ".claude" / ".haiku-daily-count"
 
-HAIKU_MODEL = os.environ.get("KB_HAIKU_MODEL", "claude-haiku-4-5-20251001")
-# Direct API via OAuth ~2-3s sync; CLI overhead was 60-80s.
-HAIKU_TIMEOUT = int(os.environ.get("KB_HAIKU_TIMEOUT", "15"))
-HAIKU_DAILY_CAP = int(os.environ.get("KB_HAIKU_DAILY_CAP", "300"))
-CREDENTIALS_FILE = HOME / ".claude" / ".credentials.json"
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-# Haiku result cache — TTL and dir.
-HAIKU_CACHE_TTL = int(os.environ.get("KB_HAIKU_CACHE_TTL", "300"))
-HAIKU_CACHE_DIR = CACHE_DIR
-# Adaptive skip: skip Haiku when BM25 already decided.
-SKIP_HAIKU_TOP1 = float(os.environ.get("KB_SKIP_HAIKU_TOP1", "12.0"))
-SKIP_HAIKU_GAP = float(os.environ.get("KB_SKIP_HAIKU_GAP", "5.0"))
 BUDGET_BYTES = int(os.environ.get("KB_BUDGET_BYTES", "15000"))
 TOP_BM25 = int(os.environ.get("KB_TOP_BM25", "40"))
 TOP_FINAL = int(os.environ.get("KB_TOP_FINAL", "8"))
 DEDUPE_TTL = int(os.environ.get("KB_DEDUPE_TTL", "60"))
-# Haiku confidence tiers (when Haiku rerank ativo)
-HIGH_THRESHOLD = float(os.environ.get("KB_HIGH_THRESHOLD", "0.75"))
-MID_THRESHOLD = float(os.environ.get("KB_MID_THRESHOLD", "0.45"))
-# BM25-fallback tiers (raised post-eval: 3.0→5.0 kill false positives)
+# Hybrid tiers (score = α·cosine + β·BM25_norm, bounded ~[0, 1.3]). The tier is
+# the load-bearing decision: high injects the top-1 body excerpt, mid injects
+# links only, low collapses to "no strong match". Calibration (20-query eval +
+# live logs): on-topic top-1 lands ≥ 0.60; vague prompts cluster 0.32–0.53.
+HYBRID_HIGH_TIER = float(os.environ.get("KB_HYBRID_HIGH", "0.60"))
+HYBRID_MID_TIER = float(os.environ.get("KB_HYBRID_MID", "0.45"))
+# BM25-only tiers (raw scores; daemon-down fallback. Raised post-eval: 3.0→5.0
+# kill false positives)
 BM25_HIGH_TIER = float(os.environ.get("KB_BM25_HIGH", "8.0"))
 BM25_MID_TIER = float(os.environ.get("KB_BM25_MID", "5.0"))
 # Scope weights: dense knowledge boost (workspace > project > ticket)
@@ -98,10 +86,6 @@ STATUS_WEIGHT = {
 # Manifest mtime walk skip TTL — scales for a large vault
 MANIFEST_RECHECK_TTL = int(os.environ.get("KB_MANIFEST_RECHECK", "30"))
 FAST_MODE = os.environ.get("KB_FAST_MODE", "0") == "1"
-# Haiku rerank ON by default since 2026-05-19.
-# ~13s sync latency, accepted by the user in exchange for semantic quality.
-# Disable via KB_HAIKU_RERANK=0 or KB_FAST_MODE=1.
-HAIKU_RERANK = os.environ.get("KB_HAIKU_RERANK", "1") == "1" and not FAST_MODE
 # Embedding-backed primary retrieval (via kb-embed-daemon). Falls back to
 # pure BM25 if daemon unreachable. Hard-restricted to kind=md — transcripts
 # belong to kb-sync (capture), not interactive injection.
@@ -403,190 +387,6 @@ def bm25_score(query_tokens: list, entries: list) -> list:
     return scored
 
 
-# ====== HAIKU RERANK ======
-
-
-def get_daily_count() -> int:
-    today = time.strftime("%Y-%m-%d")
-    if not DAILY_COUNT_FILE.exists():
-        return 0
-    try:
-        lines = DAILY_COUNT_FILE.read_text(encoding="utf-8").splitlines()
-        if len(lines) >= 2 and lines[0] == today:
-            return int(lines[1])
-    except Exception:
-        return 0
-    return 0
-
-
-def incr_daily_count() -> None:
-    today = time.strftime("%Y-%m-%d")
-    cur = get_daily_count()
-    try:
-        DAILY_COUNT_FILE.write_text(f"{today}\n{cur + 1}\n", encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _load_oauth_token():
-    try:
-        with CREDENTIALS_FILE.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        return data.get("claudeAiOauth", {}).get("accessToken")
-    except Exception as exc:
-        log_budget(f"haiku creds load fail: {exc}")
-        return None
-
-
-def _haiku_cache_key(prompt: str, candidates: list, entries: list) -> str:
-    """Reordering-invariant hash — only the prompt's stemmed tokens + candidate paths."""
-    prompt_tokens = sorted(set(tokenize(prompt)))
-    paths = sorted(entries[i]["path"] for _, i in candidates)
-    payload = json.dumps({"p": prompt_tokens, "c": paths}, ensure_ascii=False)
-    return hashlib.md5(payload.encode("utf-8")).hexdigest()[:16]
-
-
-def _haiku_cache_get(key: str):
-    cache_file = HAIKU_CACHE_DIR / f"kb-haiku-{key}.json"
-    if not cache_file.exists():
-        return None
-    try:
-        if time.time() - cache_file.stat().st_mtime > HAIKU_CACHE_TTL:
-            return None
-        with cache_file.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except Exception:
-        return None
-
-
-def _haiku_cache_put(key: str, value: dict) -> None:
-    cache_file = HAIKU_CACHE_DIR / f"kb-haiku-{key}.json"
-    try:
-        with cache_file.open("w", encoding="utf-8") as fh:
-            json.dump(value, fh, ensure_ascii=False)
-    except Exception:
-        pass
-
-
-def _haiku_cache_cleanup() -> None:
-    """Delete Haiku caches older than 2x TTL."""
-    cutoff = time.time() - HAIKU_CACHE_TTL * 2
-    try:
-        for f in HAIKU_CACHE_DIR.glob("kb-haiku-*.json"):
-            try:
-                if f.stat().st_mtime < cutoff:
-                    f.unlink()
-            except OSError:
-                continue
-    except OSError:
-        pass
-
-
-def haiku_rerank(prompt: str, candidates: list, entries: list):
-    if FAST_MODE:
-        return None
-    if not candidates:
-        return None
-    cache_key = _haiku_cache_key(prompt, candidates, entries)
-    cached = _haiku_cache_get(cache_key)
-    if cached is not None:
-        log_budget(f"haiku cache hit {cache_key}")
-        return cached
-    if get_daily_count() >= HAIKU_DAILY_CAP:
-        log_budget(f"haiku cap reached ({HAIKU_DAILY_CAP}) — fallback bm25")
-        return None
-    token = _load_oauth_token()
-    if not token:
-        log_budget("haiku: no OAuth token — fallback bm25")
-        return None
-    lines = []
-    for idx, (score, i) in enumerate(candidates, 1):
-        e = entries[i]
-        tags = ",".join(e["tags"][:5]) if e["tags"] else ""
-        lines.append(
-            f"{idx}. [{e['scope']}] {e['path']}\n"
-            f"   desc: {e['desc'][:140]}\n"
-            f"   tags: {tags}\n"
-            f"   mod: {e['modulo']}\n"
-            f"   bm25: {score:.2f}"
-        )
-    cand_block = "\n".join(lines)
-    user_clip = prompt[:1500]
-    rerank_prompt = (
-        f"User prompt:\n\"\"\"\n{user_clip}\n\"\"\"\n\n"
-        f"Vault candidates (BM25 top {len(candidates)}):\n{cand_block}\n\n"
-        "Task: rerank by semantic relevance to the prompt. "
-        "Consider intent, modules, synonyms, and technical abbreviations. "
-        "Items with scope 'workspace' and 'project' have higher density — prefer them on ties.\n\n"
-        "Reply with a SINGLE JSON line:\n"
-        "{\"items\": [{\"path\": \"<path>\", \"confidence\": 0.0-1.0, \"why\": \"<short phrase, same language as the candidate>\"}], \"tier\": \"high|mid|low\"}\n\n"
-        f"At most {TOP_FINAL} items. Tier by top-1 confidence: "
-        f">= {HIGH_THRESHOLD} high; {MID_THRESHOLD}-{HIGH_THRESHOLD} mid; "
-        f"< {MID_THRESHOLD} low (items may be empty)."
-    )
-    body = json.dumps({
-        "model": HAIKU_MODEL,
-        "max_tokens": 800,
-        "messages": [{"role": "user", "content": rerank_prompt}],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        ANTHROPIC_API_URL,
-        data=body,
-        headers={
-            "authorization": f"Bearer {token}",
-            "content-type": "application/json",
-            "anthropic-version": "2023-06-01",
-        },
-    )
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=HAIKU_TIMEOUT) as resp:
-            raw = resp.read().decode("utf-8", errors="ignore")
-        incr_daily_count()
-        elapsed = time.time() - t0
-        try:
-            data = json.loads(raw)
-        except Exception as exc:
-            log_budget(f"haiku json parse fail after {elapsed:.2f}s: {exc}")
-            return None
-        content_blocks = data.get("content", [])
-        text = ""
-        for blk in content_blocks:
-            if blk.get("type") == "text":
-                text += blk.get("text", "")
-        if not text:
-            log_budget(f"haiku empty content after {elapsed:.2f}s")
-            return None
-        usage = data.get("usage", {})
-        log_budget(
-            f"haiku ok {elapsed:.2f}s in={usage.get('input_tokens', 0)} "
-            f"out={usage.get('output_tokens', 0)}"
-        )
-        m = re.search(r"\{.*\}", text, re.S)
-        if not m:
-            return None
-        parsed = json.loads(m.group())
-        _haiku_cache_put(cache_key, parsed)
-        return parsed
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="ignore")[:300] if exc.fp else ""
-        if exc.code == 401:
-            log_budget(
-                f"haiku http 401 UNAUTHORIZED after {time.time()-t0:.2f}s — "
-                f"OAuth token expirado. Rode /login no Claude Code para renovar. "
-                f"Body: {body}"
-            )
-        else:
-            log_budget(f"haiku http {exc.code} after {time.time()-t0:.2f}s: {body}")
-        return None
-    except (TimeoutError, urllib.error.URLError) as exc:
-        log_budget(f"haiku network error after {time.time()-t0:.2f}s: {exc!r}")
-        return None
-    except Exception as exc:
-        log_budget(f"haiku unexpected error: {exc!r}")
-        return None
-
-
 # ====== TICKET MATCH (additive Path A) ======
 
 
@@ -753,7 +553,7 @@ def hybrid_candidates(prompt: str, q_tokens: list, entries: list,
     """Combine cosine (daemon) + normalized BM25 over the same chunks.
 
     Returns [(score, idx)] in entries-list space — same shape as bm25_top so
-    the rest of the pipeline (Haiku rerank, emit, GraphRAG) is unchanged.
+    the rest of the pipeline (emit, GraphRAG) is unchanged.
 
     Falls back to bm25_top untouched if the daemon is unreachable.
     """
@@ -800,16 +600,14 @@ def _is_trackable_learning(path: str) -> bool:
     return True
 
 
-def emit_output(branch: str, ticket_match, reranked, bm25_top, entries, injected_paths=None) -> str:
+def emit_output(branch: str, ticket_match, candidates, entries, injected_paths=None) -> str:
     out = ["<vault-context>"]
     branch_disp = branch if branch else "no-branch"
     out.append(f"KB cross-ticket (branch={branch_disp}):")
     out.append("")
-    entry_by_path = {e["path"]: e for e in entries}
     entry_by_name = {}
     for e in entries:
         entry_by_name.setdefault(e["name"], []).append(e["path"])
-    used_rerank = False
 
     def _track(p: str) -> None:
         if injected_paths is None or not p:
@@ -817,53 +615,61 @@ def emit_output(branch: str, ticket_match, reranked, bm25_top, entries, injected
         if _is_trackable_learning(p) and p not in injected_paths:
             injected_paths.append(p)
 
-    if reranked and isinstance(reranked, dict):
-        items = reranked.get("items") or []
-        tier = reranked.get("tier", "mid")
-        if items:
-            used_rerank = True
-            out.append(f"## Top matches (tier={tier}, via Haiku rerank):")
-            top1_conf = float(items[0].get("confidence", 0) or 0)
-            for it in items[:TOP_FINAL]:
-                p = it.get("path", "")
-                conf = it.get("confidence", 0)
-                why = it.get("why", "")
-                try:
-                    conf_f = float(conf)
-                except Exception:
-                    conf_f = 0.0
-                out.append(f"- [[{p}]] (conf={conf_f:.2f}) — {why}")
-                _track(p)
+    if candidates:
+        top_score = candidates[0][0]
+        # Hybrid scores live in ~[0,1.3]; BM25 raw in [0,30+]. Detect by range.
+        is_hybrid = top_score <= 1.5
+        if is_hybrid:
+            hi, mid = HYBRID_HIGH_TIER, HYBRID_MID_TIER
+            source_label = "hybrid embedding (cosine+BM25)"
+            score_label = "score"
+        else:
+            hi, mid = BM25_HIGH_TIER, BM25_MID_TIER
+            source_label = "BM25 lexical"
+            score_label = "bm25"
+        if top_score >= hi:
+            tier_label = "high"
+        elif top_score >= mid:
+            tier_label = "mid"
+        else:
+            tier_label = "low"
 
-            if tier == "high" and items:
-                top_path = items[0].get("path", "")
-                top_entry = entry_by_path.get(top_path)
-                if top_entry:
-                    body_path = VAULT / top_path
-                    if body_path.exists():
-                        try:
-                            content = body_path.read_text(encoding="utf-8", errors="ignore")
-                            if content.startswith("---"):
-                                end = content.find("\n---", 3)
-                                if end >= 0:
-                                    content = content[end + 4:]
-                            content = content.strip()
-                            excerpt = content[:1200]
-                            out.append("")
-                            out.append(f"### Body excerpt — {top_path}:")
-                            out.append(excerpt)
-                            if len(content) > 1200:
-                                out.append("[...truncated]")
-                        except Exception:
-                            pass
+        if tier_label == "low":
+            out.append(f"## No strong match ({source_label}):")
+            out.append(f"- top {score_label}: {top_score:.2f} (mid threshold: {mid})")
+            out.append("- /kb-search if relevant to the technical context")
+        else:
+            out.append(f"## Top matches (tier={tier_label}, via {source_label}):")
+            for score, i in candidates[:TOP_FINAL]:
+                e = entries[i]
+                out.append(f"- [[{e['path']}]] ({score_label}={score:.2f}) — {e['desc'][:120]}")
+                _track(e["path"])
+
+            if tier_label == "high":
+                top_entry = entries[candidates[0][1]]
+                body_path = VAULT / top_entry["path"]
+                if body_path.exists():
+                    try:
+                        content = body_path.read_text(encoding="utf-8", errors="ignore")
+                        if content.startswith("---"):
+                            end = content.find("\n---", 3)
+                            if end >= 0:
+                                content = content[end + 4:]
+                        content = content.strip()
+                        excerpt = content[:1200]
+                        out.append("")
+                        out.append(f"### Body excerpt — {top_entry['path']}:")
+                        out.append(excerpt)
+                        if len(content) > 1200:
+                            out.append("[...truncated]")
+                    except Exception:
+                        pass
 
             linked = []
             seen_targets = set()
-            top_paths = {it.get("path", "") for it in items[:TOP_FINAL]}
-            for it in items[:2]:
-                e = entry_by_path.get(it.get("path", ""))
-                if not e:
-                    continue
+            top_paths = {entries[i]["path"] for _, i in candidates[:TOP_FINAL]}
+            for score, i in candidates[:2]:
+                e = entries[i]
                 for wl in e.get("wikilinks", [])[:5]:
                     raw = wl.strip()
                     if not raw:
@@ -879,80 +685,8 @@ def emit_output(branch: str, ticket_match, reranked, bm25_top, entries, injected
                 out.append("## Related (GraphRAG 1-hop):")
                 for raw, resolved in linked[:5]:
                     out.append(f"- [[{resolved or raw}]]")
-
-    if not used_rerank:
-        if bm25_top:
-            top_score = bm25_top[0][0]
-            # Hybrid scores live in ~[0,1.3]; BM25 raw in [0,30+]. Detect by range.
-            is_hybrid = top_score <= 1.5
-            if is_hybrid:
-                hi, mid = 0.60, 0.45
-                source_label = "hybrid embedding (cosine+BM25)"
-                score_label = "score"
-            else:
-                hi, mid = BM25_HIGH_TIER, BM25_MID_TIER
-                source_label = "BM25 lexical"
-                score_label = "bm25"
-            if top_score >= hi:
-                tier_label = "high"
-            elif top_score >= mid:
-                tier_label = "mid"
-            else:
-                tier_label = "low"
-
-            if tier_label == "low":
-                out.append(f"## No strong match ({source_label}):")
-                out.append(f"- top {score_label}: {top_score:.2f} (mid threshold: {mid})")
-                out.append("- /kb-search if relevant to the technical context")
-            else:
-                out.append(f"## Top matches (tier={tier_label}, via {source_label}):")
-                for score, i in bm25_top[:TOP_FINAL]:
-                    e = entries[i]
-                    out.append(f"- [[{e['path']}]] ({score_label}={score:.2f}) — {e['desc'][:120]}")
-                    _track(e["path"])
-
-                if tier_label == "high":
-                    top_entry = entries[bm25_top[0][1]]
-                    body_path = VAULT / top_entry["path"]
-                    if body_path.exists():
-                        try:
-                            content = body_path.read_text(encoding="utf-8", errors="ignore")
-                            if content.startswith("---"):
-                                end = content.find("\n---", 3)
-                                if end >= 0:
-                                    content = content[end + 4:]
-                            content = content.strip()
-                            excerpt = content[:1200]
-                            out.append("")
-                            out.append(f"### Body excerpt — {top_entry['path']}:")
-                            out.append(excerpt)
-                            if len(content) > 1200:
-                                out.append("[...truncated]")
-                        except Exception:
-                            pass
-
-                linked = []
-                seen_targets = set()
-                top_paths = {entries[i]["path"] for _, i in bm25_top[:TOP_FINAL]}
-                for score, i in bm25_top[:2]:
-                    e = entries[i]
-                    for wl in e.get("wikilinks", [])[:5]:
-                        raw = wl.strip()
-                        if not raw:
-                            continue
-                        resolved = resolve_wikilink(raw, entries, entry_by_name)
-                        target = resolved or raw
-                        if target in seen_targets or target in top_paths:
-                            continue
-                        seen_targets.add(target)
-                        linked.append((raw, resolved))
-                if linked:
-                    out.append("")
-                    out.append("## Related (GraphRAG 1-hop):")
-                    for raw, resolved in linked[:5]:
-                        out.append(f"- [[{resolved or raw}]]")
-        elif not ticket_match:
-            out.append("No lexical candidates. /kb-search <query> if relevant.")
+    elif not ticket_match:
+        out.append("No lexical candidates. /kb-search <query> if relevant.")
 
     if ticket_match:
         out.append("")
@@ -978,24 +712,20 @@ def _sanitize_session(session_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9\-_]", "", session_id or "")
 
 
-def infer_tier(reranked, candidates, entries) -> str:
+def infer_tier(candidates) -> str:
     """Determine the single tier that emit_output is about to publish.
 
     Mirrors the tier rules used inside emit_output so the statusline can read
     the same signal without re-parsing the textual output. Possible values:
     "high" | "mid" | "low" | "none".
     """
-    if reranked and isinstance(reranked, dict):
-        items = reranked.get("items") or []
-        if items:
-            return reranked.get("tier", "mid")
     if not candidates:
         return "none"
     top_score = candidates[0][0]
     # Hybrid scores live in ~[0, 1.3]; raw BM25 in [0, 30+]. Detect by range.
     is_hybrid = top_score <= 1.5
     if is_hybrid:
-        hi, mid = 0.60, 0.45
+        hi, mid = HYBRID_HIGH_TIER, HYBRID_MID_TIER
     else:
         hi, mid = BM25_HIGH_TIER, BM25_MID_TIER
     if top_score >= hi:
@@ -1233,6 +963,12 @@ def main():
                     f.unlink()
             except OSError:
                 continue
+        # Orphaned caches from the removed LLM rerank stage — purge on sight.
+        for f in CACHE_DIR.glob("kb-haiku-*.json"):
+            try:
+                f.unlink()
+            except OSError:
+                continue
     except OSError:
         pass
 
@@ -1247,7 +983,7 @@ def main():
     entries = manifest.get("entries", [])
     if not entries:
         if ticket_match:
-            out_text = emit_output(branch, ticket_match, None, [], entries)
+            out_text = emit_output(branch, ticket_match, [], entries)
             bump_tier_state(session_id, "none")
             bump_token_state(session_id, out_text, "none")
             print(out_text)
@@ -1256,7 +992,7 @@ def main():
     q_tokens = tokenize(prompt)
     if not q_tokens:
         if ticket_match:
-            out_text = emit_output(branch, ticket_match, None, [], entries)
+            out_text = emit_output(branch, ticket_match, [], entries)
             bump_tier_state(session_id, "none")
             bump_token_state(session_id, out_text, "none")
             print(out_text)
@@ -1279,27 +1015,9 @@ def main():
     if not candidates and not ticket_match:
         return
 
-    # Adaptive Haiku skip only applies in pure-BM25 mode (scores are raw BM25 there).
-    # In hybrid mode every score is bounded ~[0, 1.3]; we always rerank.
-    skip_haiku = False
-    if not via_embed and candidates and HAIKU_RERANK:
-        top1 = candidates[0][0]
-        top2 = candidates[1][0] if len(candidates) >= 2 else 0.0
-        if top1 >= SKIP_HAIKU_TOP1 and (top1 - top2) >= SKIP_HAIKU_GAP:
-            skip_haiku = True
-            log_budget(f"haiku skip: bm25 top1={top1:.2f} gap={top1-top2:.2f} (decidido)")
-
-    reranked = (
-        haiku_rerank(prompt, candidates, entries)
-        if (candidates and HAIKU_RERANK and not skip_haiku)
-        else None
-    )
-
-    _haiku_cache_cleanup()
-
     injected_paths = []
-    output = emit_output(branch, ticket_match, reranked, candidates, entries, injected_paths)
-    tier = infer_tier(reranked, candidates, entries)
+    output = emit_output(branch, ticket_match, candidates, entries, injected_paths)
+    tier = infer_tier(candidates)
     bump_tier_state(session_id, tier)
     bump_token_state(session_id, output, tier)
     try:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# UserPromptSubmit hook — KB context injection (two-stage BM25 + Haiku rerank).
+# UserPromptSubmit hook — KB context injection (hybrid embedding + BM25).
 #
 # Pipeline lives in kb_retrieve.py. This script:
 #   1. Honors kill-switch (file + env).

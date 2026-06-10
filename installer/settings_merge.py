@@ -77,8 +77,8 @@ def kb_desired_hooks(claude_dir: Path) -> dict:
                     "hook": {
                         "type": "command",
                         "command": bash("kb-context.sh"),
-                        "timeout": 25,
-                        "statusMessage": "KB: retrieval (BM25 + rerank)...",
+                        "timeout": 10,
+                        "statusMessage": "KB: retrieval (hybrid embedding + BM25)...",
                     },
                 },
             ],

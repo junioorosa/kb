@@ -30,8 +30,8 @@ today; Codex and MCP clients are thin adapters on the same engine.
 <vault-context>
 KB cross-ticket (branch=fix/login-timeout):
 
-## Top matches (tier=high, via Haiku rerank):
-- [[MyWorkspace/auth-service/fix/session-expiry/Learnings/jwt-clock-skew.md]] (conf=0.86)
+## Top matches (tier=high, via hybrid embedding (cosine+BM25)):
+- [[MyWorkspace/auth-service/fix/session-expiry/Learnings/jwt-clock-skew.md]] (score=0.86)
   — boundary compared with < instead of <=; also missing clock-skew tolerance
 
 ### Body excerpt — MyWorkspace/auth-service/fix/session-expiry/Learnings/jwt-clock-skew.md:
@@ -82,7 +82,7 @@ Flags (daily time, skip the manager auto-launch), status, and rollback are in
 | Capability | What it does |
 |------------|--------------|
 | **Auto-capture** | A nightly sync reads your authored commits **and** the marked session transcript, and distills them into learnings — one markdown file per insight, keyed to the branch. |
-| **On-prompt retrieval** | A hook injects the most relevant past learnings into your agent's context *before* it answers — hybrid semantic + lexical search, then a Haiku rerank into high/mid/low tiers. |
+| **On-prompt retrieval** | A hook injects the most relevant past learnings into your agent's context *before* it answers — hybrid semantic + lexical search (local embeddings + BM25), tiered high/mid/low. No API call in the hot path. |
 | **SDLC-anchored** | Knowledge is tied to the unit of work (workspace → project → branch → learning). Merge a branch to production and its ticket auto-resolves; mark a dead end `--experimental` and it's down-weighted. |
 | **Local-first** | Engine, vault, and manager all run on your machine. The vault is a local-only git repo with no remote. No telemetry. |
 | **Plug-and-play** | One installer wires the hooks and the daily job; a localhost manager app configures everything without hand-editing JSON. |
