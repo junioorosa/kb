@@ -24,8 +24,12 @@ def emit(msg: str) -> None:
     sys.stdout.flush()
 
 
+def _kb_home() -> str:
+    return os.environ.get("KB_HOME") or os.path.join(os.path.expanduser("~"), ".kb")
+
+
 def _state_dir() -> str:
-    return os.path.join(os.path.expanduser("~"), ".claude", "state")
+    return os.path.join(_kb_home(), "state")
 
 
 def _load_json(path: str) -> dict:
@@ -57,7 +61,9 @@ def _bar(value: int, total: int, width: int = 18) -> str:
 def main() -> int:
     if os.environ.get("KB_HOOKS_DISABLED") == "1":
         return 0
-    if os.path.isfile(os.path.expanduser("~/.claude/kb-hooks-disabled")):
+    if os.path.isfile(os.path.join(_kb_home(), "hooks-disabled")):
+        return 0
+    if os.path.isfile(os.path.expanduser("~/.claude/kb-hooks-disabled")):  # legacy
         return 0
 
     try:

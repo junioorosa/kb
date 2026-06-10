@@ -9,10 +9,12 @@
 
 set -u
 
-[ -f "$HOME/.claude/kb-hooks-disabled" ] && exit 0
+KB="${KB_HOME:-$HOME/.kb}"
+[ -f "$KB/hooks-disabled" ] && exit 0
+[ -f "$HOME/.claude/kb-hooks-disabled" ] && exit 0  # legacy kill-switch, still honored
 [ "${KB_HOOKS_DISABLED:-0}" = "1" ] && exit 0
 
-LOCK="$HOME/.claude/state/kb-embed-daemon.lock"
+LOCK="$KB/state/kb-embed-daemon.lock"
 
 # Already running? Verify lockfile and that something answers the port.
 if [ -f "$LOCK" ]; then
@@ -54,7 +56,8 @@ if [ -z "$PY" ]; then
   fi
 fi
 
-DAEMON="$HOME/.claude/scripts/kb-embed-daemon.py"
+DAEMON="$KB/engine/kb-embed-daemon.py"
+[ -f "$DAEMON" ] || DAEMON="$HOME/.claude/scripts/kb-embed-daemon.py"  # pre-0.11 layout
 [ -f "$DAEMON" ] || exit 0
 
 # Detached spawn that survives the SessionStart hook process.

@@ -26,17 +26,17 @@ def _python_exe(explicit: str | None) -> str:
     return explicit or sys.executable or "python"
 
 
-def _paths(claude_dir: Path):
-    claude_dir = Path(claude_dir)
-    script = claude_dir / "scripts" / "kb-sync.py"
-    log = claude_dir / "logs" / "kb-sync.log"
+def _paths(kb_dir: Path):
+    kb_dir = Path(kb_dir)
+    script = kb_dir / "engine" / "kb-sync.py"
+    log = kb_dir / "logs" / "kb-sync.log"
     return script, log
 
 
 # --- Windows -----------------------------------------------------------------
 
-def _register_windows(claude_dir: Path, python_exe: str, time_hhmm: str, dry_run: bool) -> dict:
-    script, log = _paths(claude_dir)
+def _register_windows(kb_dir: Path, python_exe: str, time_hhmm: str, dry_run: bool) -> dict:
+    script, log = _paths(kb_dir)
     log.parent.mkdir(parents=True, exist_ok=True)
     # cmd /c so we can redirect stdout+stderr to the log, matching the proven task.
     tr = f'cmd /c "{python_exe} {script} >> {log} 2>&1"'
@@ -70,8 +70,8 @@ def _unregister_windows(dry_run: bool) -> dict:
 
 # --- macOS (launchd) ---------------------------------------------------------
 
-def _macos_plist(claude_dir: Path, python_exe: str, time_hhmm: str) -> str:
-    script, log = _paths(claude_dir)
+def _macos_plist(kb_dir: Path, python_exe: str, time_hhmm: str) -> str:
+    script, log = _paths(kb_dir)
     hh, mm = time_hhmm.split(":")
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -90,14 +90,14 @@ def _macos_plist(claude_dir: Path, python_exe: str, time_hhmm: str) -> str:
 """
 
 
-def _register_macos(claude_dir: Path, python_exe: str, time_hhmm: str, dry_run: bool) -> dict:
-    plist = _macos_plist(claude_dir, python_exe, time_hhmm)
+def _register_macos(kb_dir: Path, python_exe: str, time_hhmm: str, dry_run: bool) -> dict:
+    plist = _macos_plist(kb_dir, python_exe, time_hhmm)
     target = Path.home() / "Library" / "LaunchAgents" / "com.kb.sync.plist"
     report = {"os": "macos", "plist_path": str(target), "time": time_hhmm, "artifact": plist, "registered": False}
     if dry_run:
         return report
     target.parent.mkdir(parents=True, exist_ok=True)
-    _paths(claude_dir)[1].parent.mkdir(parents=True, exist_ok=True)
+    _paths(kb_dir)[1].parent.mkdir(parents=True, exist_ok=True)
     target.write_text(plist, encoding="utf-8")
     subprocess.run(["launchctl", "unload", str(target)], capture_output=True, text=True, errors="replace")
     r = subprocess.run(["launchctl", "load", str(target)], capture_output=True, text=True, errors="replace")
@@ -113,19 +113,19 @@ _CRON_BEGIN = "# >>> KB-SYNC (managed) >>>"
 _CRON_END = "# <<< KB-SYNC (managed) <<<"
 
 
-def _linux_cron_block(claude_dir: Path, python_exe: str, time_hhmm: str) -> str:
-    script, log = _paths(claude_dir)
+def _linux_cron_block(kb_dir: Path, python_exe: str, time_hhmm: str) -> str:
+    script, log = _paths(kb_dir)
     hh, mm = time_hhmm.split(":")
     line = f"{int(mm)} {int(hh)} * * * {python_exe} {script} >> {log} 2>&1"
     return f"{_CRON_BEGIN}\n{line}\n{_CRON_END}"
 
 
-def _register_linux(claude_dir: Path, python_exe: str, time_hhmm: str, dry_run: bool) -> dict:
-    block = _linux_cron_block(claude_dir, python_exe, time_hhmm)
+def _register_linux(kb_dir: Path, python_exe: str, time_hhmm: str, dry_run: bool) -> dict:
+    block = _linux_cron_block(kb_dir, python_exe, time_hhmm)
     report = {"os": "linux", "time": time_hhmm, "artifact": block, "registered": False}
     if dry_run:
         return report
-    _paths(claude_dir)[1].parent.mkdir(parents=True, exist_ok=True)
+    _paths(kb_dir)[1].parent.mkdir(parents=True, exist_ok=True)
     cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True, errors="replace")
     existing = cur.stdout if cur.returncode == 0 else ""
     # Drop any prior managed block, then append the fresh one (idempotent replace).
@@ -149,16 +149,16 @@ def _register_linux(claude_dir: Path, python_exe: str, time_hhmm: str, dry_run: 
 
 # --- Dispatch ----------------------------------------------------------------
 
-def register(claude_dir: Path, python_exe: str | None = None, time_hhmm: str = DEFAULT_TIME, dry_run: bool = False) -> dict:
+def register(kb_dir: Path, python_exe: str | None = None, time_hhmm: str = DEFAULT_TIME, dry_run: bool = False) -> dict:
     py = _python_exe(python_exe)
     if sys.platform == "win32":
-        return _register_windows(Path(claude_dir), py, time_hhmm, dry_run)
+        return _register_windows(Path(kb_dir), py, time_hhmm, dry_run)
     if sys.platform == "darwin":
-        return _register_macos(Path(claude_dir), py, time_hhmm, dry_run)
-    return _register_linux(Path(claude_dir), py, time_hhmm, dry_run)
+        return _register_macos(Path(kb_dir), py, time_hhmm, dry_run)
+    return _register_linux(Path(kb_dir), py, time_hhmm, dry_run)
 
 
-def status(claude_dir: Path | None = None) -> dict:
+def status(kb_dir: Path | None = None) -> dict:
     if sys.platform == "win32":
         return _status_windows()
     if sys.platform == "darwin":
@@ -181,6 +181,6 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     if args.status:
-        print(json.dumps(status(Path(args.claude_dir)), indent=2))
+        print(json.dumps(status(Path(args.kb_dir)), indent=2))
     else:
-        print(json.dumps(register(Path(args.claude_dir), args.python, args.time, dry_run=not args.apply), indent=2))
+        print(json.dumps(register(Path(args.kb_dir), args.python, args.time, dry_run=not args.apply), indent=2))

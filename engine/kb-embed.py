@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
-CACHE_DIR = Path.home() / ".claude" / "cache" / "kb-embed"
+KB_HOME = Path(os.environ.get("KB_HOME") or (Path.home() / ".kb"))
+CACHE_DIR = KB_HOME / "cache" / "kb-embed"
 VECTORS_PATH = CACHE_DIR / "vectors.npy"
 META_PATH = CACHE_DIR / "meta.jsonl"
 MANIFEST_PATH = CACHE_DIR / "manifest.json"
@@ -532,7 +533,7 @@ def read_md_body(vault: Path, rel_path: str, max_chars: int = 3000) -> str:
 # ---------- Daemon client (for hooks needing low-latency queries) ----------
 
 DAEMON_HOST = "127.0.0.1"
-DAEMON_LOCK = Path.home() / ".claude" / "state" / "kb-embed-daemon.lock"
+DAEMON_LOCK = KB_HOME / "state" / "kb-embed-daemon.lock"
 
 
 def _daemon_port() -> int | None:
@@ -647,7 +648,7 @@ def _cli():
 
     p_idx = sub.add_parser("reindex", help="reindex vault (and optionally transcripts)")
     p_idx.add_argument("--vault", required=True)
-    p_idx.add_argument("--state-dir", default=str(Path.home() / ".claude" / "state"))
+    p_idx.add_argument("--state-dir", default=str(KB_HOME / "state"))
     p_idx.add_argument("--projects-dir", default=str(Path.home() / ".claude" / "projects"))
     p_idx.add_argument("--branches", help="comma-separated open branches for transcript indexing")
     p_idx.add_argument("--no-transcripts", action="store_true")

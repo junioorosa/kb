@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from settings_merge import merge_settings, SettingsMergeError, kb_desired_hooks  # noqa: E402
 
-CLAUDE_DIR = Path("C:/Users/example/.claude")
+KB_DIR = Path("C:/Users/example/.kb")
 PASS, FAIL = 0, 0
 
 
@@ -40,7 +40,7 @@ def test_fresh_install():
     print("test_fresh_install")
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "settings.json"  # does not exist
-        rep = merge_settings(p, CLAUDE_DIR)
+        rep = merge_settings(p, KB_DIR)
         check("wrote a new file", rep["wrote"] and p.exists())
         check("no backup (nothing to back up)", rep["backup"] is None)
         s = json.loads(p.read_text(encoding="utf-8"))
@@ -75,7 +75,7 @@ def test_preserves_foreign_hooks():
             "statusLine": {"type": "command", "command": "powershell ... combined-statusline.ps1"},
         }
         p.write_text(json.dumps(existing), encoding="utf-8")
-        rep = merge_settings(p, CLAUDE_DIR)
+        rep = merge_settings(p, KB_DIR)
         s = json.loads(p.read_text(encoding="utf-8"))
         ups = _commands(s, "UserPromptSubmit")
         check("foreign caveman tracker preserved", any("caveman-mode-tracker.js" in c for c in ups))
@@ -91,10 +91,10 @@ def test_idempotent():
     print("test_idempotent")
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "settings.json"
-        r1 = merge_settings(p, CLAUDE_DIR)
+        r1 = merge_settings(p, KB_DIR)
         check("first run changed", r1["changed"] and r1["wrote"])
         before = p.read_text(encoding="utf-8")
-        r2 = merge_settings(p, CLAUDE_DIR)
+        r2 = merge_settings(p, KB_DIR)
         check("second run no change", not r2["changed"] and not r2["wrote"])
         check("second run no backup", r2["backup"] is None)
         check("file byte-identical after re-run", p.read_text(encoding="utf-8") == before)
@@ -103,23 +103,23 @@ def test_idempotent():
 
 def test_recognizes_localized_variant():
     print("test_recognizes_localized_variant")
-    # An entry already wired with a different timeout AND a localized statusMessage,
-    # but the SAME command substring, must be recognized (skipped), not duplicated.
+    # An entry already wired at the CURRENT path with a different timeout AND a
+    # localized statusMessage must be recognized (skipped), not duplicated.
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "settings.json"
-        h = CLAUDE_DIR.as_posix()
+        h = KB_DIR.as_posix()
         existing = {
             "hooks": {
                 "UserPromptSubmit": [
                     {"hooks": [
-                        {"type": "command", "command": f'bash "{h}/hooks/kb-context.sh"',
+                        {"type": "command", "command": f'bash "{h}/engine/kb-context.sh"',
                          "timeout": 99, "statusMessage": "KB: recall cross-ticket (PT)..."},
                     ]}
                 ],
             },
         }
         p.write_text(json.dumps(existing), encoding="utf-8")
-        rep = merge_settings(p, CLAUDE_DIR)
+        rep = merge_settings(p, KB_DIR)
         s = json.loads(p.read_text(encoding="utf-8"))
         ups = _commands(s, "UserPromptSubmit")
         check("kb-context.sh not duplicated", sum("kb-context.sh" in c for c in ups) == 1)
@@ -127,6 +127,39 @@ def test_recognizes_localized_variant():
         # The pre-existing one keeps its localized timeout (we never mutate foreign-shaped entries).
         ctx = next(h for g in s["hooks"]["UserPromptSubmit"] for h in g["hooks"] if "kb-context.sh" in h["command"])
         check("existing timeout preserved (non-destructive)", ctx["timeout"] == 99)
+
+
+def test_repoints_stale_own_entry():
+    print("test_repoints_stale_own_entry")
+    # The pre-0.11 install wired bash ".../.claude/hooks/kb-context.sh". The merge
+    # must recognize that entry as OURS, rewrite ONLY its command to the new
+    # engine path, and preserve the user-tuned timeout/statusMessage.
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "settings.json"
+        existing = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [
+                        {"type": "command",
+                         "command": 'bash "C:/Users/example/.claude/hooks/kb-context.sh"',
+                         "timeout": 99, "statusMessage": "KB: recall cross-ticket (PT)..."},
+                    ]}
+                ],
+            },
+        }
+        p.write_text(json.dumps(existing), encoding="utf-8")
+        rep = merge_settings(p, KB_DIR)
+        s = json.loads(p.read_text(encoding="utf-8"))
+        ups = _commands(s, "UserPromptSubmit")
+        check("stale entry repointed, not duplicated", sum("kb-context.sh" in c for c in ups) == 1)
+        check("reported as updated", "UserPromptSubmit:kb-context.sh" in rep["updated"])
+        ctx = next(h for g in s["hooks"]["UserPromptSubmit"] for h in g["hooks"] if "kb-context.sh" in h["command"])
+        check("command now targets the engine dir", "/.kb/engine/kb-context.sh" in ctx["command"])
+        check("custom timeout survives the repoint", ctx["timeout"] == 99)
+        check("localized statusMessage survives", ctx["statusMessage"].endswith("(PT)..."))
+        # Second run: nothing left to change.
+        r2 = merge_settings(p, KB_DIR)
+        check("repoint is idempotent", not r2["changed"])
 
 
 def test_refuses_malformed_json():
@@ -137,7 +170,7 @@ def test_refuses_malformed_json():
         p.write_text(garbage, encoding="utf-8")
         raised = False
         try:
-            merge_settings(p, CLAUDE_DIR)
+            merge_settings(p, KB_DIR)
         except SettingsMergeError:
             raised = True
         check("raised SettingsMergeError", raised)
@@ -149,14 +182,14 @@ def test_atomic_no_partial_on_existing():
     # Sanity: after a successful merge, no stray temp file remains.
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "settings.json"
-        merge_settings(p, CLAUDE_DIR)
+        merge_settings(p, KB_DIR)
         tmp = p.with_name(p.name + ".kb-tmp")
         check("no leftover temp file", not tmp.exists())
 
 
 def main():
     # Smoke: the factory builds 5 entries across 3 events.
-    desired = kb_desired_hooks(CLAUDE_DIR)
+    desired = kb_desired_hooks(KB_DIR)
     total = sum(len(v["entries"]) for v in desired.values())
     check("factory yields 5 entries", total == 5)
 
@@ -164,6 +197,7 @@ def main():
     test_preserves_foreign_hooks()
     test_idempotent()
     test_recognizes_localized_variant()
+    test_repoints_stale_own_entry()
     test_refuses_malformed_json()
     test_atomic_no_partial_on_existing()
 

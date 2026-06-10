@@ -38,17 +38,18 @@ class SettingsMergeError(Exception):
 # existing localized entry.
 
 
-def kb_desired_hooks(claude_dir: Path) -> dict:
+def kb_desired_hooks(kb_dir: Path) -> dict:
     """Build the KB hook entries with absolute commands for this target.
 
-    `claude_dir` is the host's Claude config dir (e.g. ~/.claude). Paths use
-    POSIX separators because the commands are handed to bash, matching the
-    format Claude Code already writes on Windows ("C:/Users/.../hook.sh").
+    `kb_dir` is the KB home (e.g. ~/.kb); the hook scripts live flat in its
+    engine/ subdir. Paths use POSIX separators because the commands are handed
+    to bash, matching the format Claude Code already writes on Windows
+    ("C:/Users/.../hook.sh").
     """
-    h = claude_dir.as_posix().rstrip("/")
+    h = kb_dir.as_posix().rstrip("/")
 
     def bash(script: str) -> str:
-        return f'bash "{h}/hooks/{script}"'
+        return f'bash "{h}/engine/{script}"'
 
     return {
         "UserPromptSubmit": {
@@ -160,31 +161,38 @@ def _find_group(groups: list, matcher) -> dict | None:
     return None
 
 
-def _group_has_key(group: dict, key: str) -> bool:
+def _entry_with_key(group: dict, key: str) -> dict | None:
     for hook in group.get("hooks", []):
         if isinstance(hook, dict) and key in str(hook.get("command", "")):
-            return True
-    return False
+            return hook
+    return None
 
 
-def merge_settings(settings_path: Path, claude_dir: Path, dry_run: bool = False) -> dict:
+def merge_settings(settings_path: Path, kb_dir: Path, dry_run: bool = False) -> dict:
     """Ensure KB hook entries exist in settings.json. Returns a change report.
+
+    An entry whose command contains our key but points somewhere else (the
+    pre-0.11 ~/.claude/hooks path, or a moved KB home) is OURS — its command is
+    rewritten to the current target, preserving the user's timeout /
+    statusMessage customizations. That one field is the only thing ever updated;
+    foreign entries stay untouched.
 
     Report shape:
         {
           "changed": bool,
           "added":   ["UserPromptSubmit:kb-context.sh", ...],
-          "skipped": ["UserPromptSubmit:kb-mark-intercept.sh", ...],  # already present
+          "updated": ["UserPromptSubmit:kb-context.sh", ...],  # command repointed
+          "skipped": ["UserPromptSubmit:kb-mark-intercept.sh", ...],  # already current
           "created_groups": ["PostToolUse[matcher=Read]", ...],
           "backup": "<path or None>",
           "wrote": bool,
         }
     """
     settings_path = Path(settings_path)
-    claude_dir = Path(claude_dir)
+    kb_dir = Path(kb_dir)
 
     settings = _load_settings(settings_path)
-    desired = kb_desired_hooks(claude_dir)
+    desired = kb_desired_hooks(kb_dir)
 
     hooks = settings.setdefault("hooks", {})
     if not isinstance(hooks, dict):
@@ -193,6 +201,7 @@ def merge_settings(settings_path: Path, claude_dir: Path, dry_run: bool = False)
     report = {
         "changed": False,
         "added": [],
+        "updated": [],
         "skipped": [],
         "created_groups": [],
         "backup": None,
@@ -219,12 +228,17 @@ def merge_settings(settings_path: Path, claude_dir: Path, dry_run: bool = False)
         for entry in spec["entries"]:
             key = entry["key"]
             label = f"{event}:{key}"
-            if _group_has_key(group, key):
-                report["skipped"].append(label)
-            else:
+            existing = _entry_with_key(group, key)
+            if existing is None:
                 group["hooks"].append(entry["hook"])
                 report["added"].append(label)
                 report["changed"] = True
+            elif existing.get("command") != entry["hook"]["command"]:
+                existing["command"] = entry["hook"]["command"]
+                report["updated"].append(label)
+                report["changed"] = True
+            else:
+                report["skipped"].append(label)
 
     if not report["changed"]:
         return report  # idempotent no-op: nothing written, no backup spam
@@ -253,9 +267,9 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="Merge KB hooks into a Claude Code settings.json.")
     ap.add_argument("--settings", required=True, help="path to settings.json")
-    ap.add_argument("--claude-dir", required=True, help="host Claude config dir (e.g. ~/.claude)")
+    ap.add_argument("--kb-dir", required=True, help="KB home (e.g. ~/.kb)")
     ap.add_argument("--apply", action="store_true", help="write changes (default: dry-run)")
     args = ap.parse_args()
 
-    rep = merge_settings(Path(args.settings), Path(args.claude_dir), dry_run=not args.apply)
+    rep = merge_settings(Path(args.settings), Path(args.kb_dir), dry_run=not args.apply)
     print(json.dumps(rep, indent=2))

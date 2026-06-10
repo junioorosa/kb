@@ -138,13 +138,13 @@ context instead of having it pushed. Four tools: `kb_search` (ranked notes), `kb
 **The installer wires detected hosts automatically** (Codex, Cursor, Claude Desktop, Gemini,
 Windsurf — `--no-mcp-wire` to opt out; on Codex it also drops a when-to-use note into the
 global `AGENTS.md`). For manual setup or any other MCP host, point it at the deployed CLI
-(`<home>/.claude/hooks/kb.py mcp`):
+(`<home>/.kb/engine/kb.py mcp`):
 
 ```jsonc
 // Cursor (.cursor/mcp.json) / Claude Desktop (claude_desktop_config.json)
 {
   "mcpServers": {
-    "kb": { "command": "python", "args": ["/home/you/.claude/hooks/kb.py", "mcp"] }
+    "kb": { "command": "python", "args": ["/home/you/.kb/engine/kb.py", "mcp"] }
   }
 }
 ```
@@ -153,7 +153,7 @@ global `AGENTS.md`). For manual setup or any other MCP host, point it at the dep
 # Codex CLI (~/.codex/config.toml)
 [mcp_servers.kb]
 command = "python"
-args = ["/home/you/.claude/hooks/kb.py", "mcp"]
+args = ["/home/you/.kb/engine/kb.py", "mcp"]
 ```
 
 Tip for pull hosts: add a line to your agent instructions (e.g. `AGENTS.md`) such as

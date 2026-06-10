@@ -37,7 +37,7 @@ The output labels which counter was used.
 Run the following bash:
 
 ```bash
-state_dir="$HOME/.claude/state"
+state_dir="${KB_HOME:-$HOME/.kb}/state"
 
 # Pick the most recent token sidecar — assume current session
 latest=$(ls -t "$state_dir"/kb-tokens-*.json 2>/dev/null | head -1)

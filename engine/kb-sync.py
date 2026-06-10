@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """KB sync — filesystem-based, cross-OS, single unified routine.
 
-Scans workspaces from ~/.claude/kb-workspaces.json for git repos, dedupes by
+Scans workspaces from the KB config (kb_config.workspaces_path) for git repos, dedupes by
 remote.origin.url, then for each canonical repo:
   - Refreshes ONLY the integration/production refs it needs, by exact refspec
     (read-only on the remote; no all-heads wildcard, no --prune, nothing deleted
@@ -30,13 +30,10 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-CONFIG = Path.home() / ".claude" / "kb-workspaces.json"
-STATE_DIR = Path.home() / ".claude" / "state"
-SESSION_OFFSETS = STATE_DIR / "kb-session-offsets.json"
-RUN_STATE = STATE_DIR / "kb-run-state.json"
-SYNC_HISTORY = STATE_DIR / "kb-sync-history.json"
 HWM_CAP_DAYS = 7
 SYNC_HISTORY_CAP = 100  # keep the last N run records (rolling)
+# Claude Code's own transcript store — host data, not KB data; it stays under
+# ~/.claude regardless of where the KB home lives.
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 FM_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
@@ -63,12 +60,16 @@ def _load_kb_embed():
 kb_embed = _load_kb_embed()
 
 
-# Shared engine config resolver (kb_config). Transitional: it currently lives
-# under hooks/; collapses into the engine package later. Loaded by path so the
-# scheduled run honors KB_VAULT and the single vault-resolution order.
+# Shared engine config resolver (kb_config). Sibling in the flat layout (repo
+# engine/ and deployed <kb home>/engine/); the pre-0.11 deploy had it under
+# ../hooks/. Loaded by path so the scheduled run honors KB_VAULT and the single
+# vault-resolution order.
 def _load_kb_config():
     import importlib.util as ilu
-    path = Path(__file__).resolve().parent.parent / "hooks" / "kb_config.py"
+    here = Path(__file__).resolve().parent
+    path = here / "kb_config.py"
+    if not path.exists():
+        path = here.parent / "hooks" / "kb_config.py"
     if not path.exists():
         return None
     spec = ilu.spec_from_file_location("kb_config", path)
@@ -83,6 +84,20 @@ def _load_kb_config():
 
 
 kb_config = _load_kb_config()
+
+# Path constants resolve through kb_config (KB_HOME -> ~/.kb, config with the
+# legacy ~/.claude fallback). The env fallback below only fires if kb_config
+# itself failed to load — same shape, no second resolution order.
+if kb_config is not None:
+    CONFIG = kb_config.workspaces_path()
+    STATE_DIR = kb_config.state_dir()
+else:
+    _kbh = Path(os.environ.get("KB_HOME") or (Path.home() / ".kb"))
+    CONFIG = _kbh / "config.json"
+    STATE_DIR = _kbh / "state"
+SESSION_OFFSETS = STATE_DIR / "kb-session-offsets.json"
+RUN_STATE = STATE_DIR / "kb-run-state.json"
+SYNC_HISTORY = STATE_DIR / "kb-sync-history.json"
 
 
 def parse_branch(branch: str):
@@ -2115,7 +2130,7 @@ def main():
             print(f"daemon reindex notify failed (non-fatal): {type(e).__name__}: {e}")
 
     if report.has_activity() and not args.dry_run:
-        report_path = Path.home() / ".claude" / "logs" / f"kb-sync-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.html"
+        report_path = (kb_config.logs_dir() if kb_config is not None else STATE_DIR.parent / "logs") / f"kb-sync-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.html"
         report.write_html(vault, report_path)
         print(f"\nreport: {report_path}")
 

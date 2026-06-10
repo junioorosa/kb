@@ -139,12 +139,50 @@ def test_write_refuses_malformed_existing():
             _restore_home(prev)
 
 
+def test_home_and_config_resolution():
+    """kb_home: KB_HOME env -> ~/.kb. workspaces_path: canonical config.json
+    first; pre-0.11 ~/.claude/kb-workspaces.json only while no canonical exists;
+    a fresh machine resolves (and therefore writes) canonical."""
+    print("test_home_and_config_resolution")
+    with tempfile.TemporaryDirectory() as d:
+        prev = _with_home(d)
+        prev_kbh = os.environ.pop("KB_HOME", None)
+        try:
+            home = Path(d)
+            check("kb_home defaults under HOME", kb_config.kb_home() == home / ".kb")
+            os.environ["KB_HOME"] = str(home / "elsewhere")
+            check("KB_HOME env wins", kb_config.kb_home() == home / "elsewhere")
+            check("state_dir follows kb_home", kb_config.state_dir() == home / "elsewhere" / "state")
+            os.environ.pop("KB_HOME")
+
+            # neither file exists -> canonical (new installs land there)
+            canonical = home / ".kb" / "config.json"
+            legacy = home / ".claude" / "kb-workspaces.json"
+            check("fresh machine resolves canonical", kb_config.workspaces_path() == canonical)
+
+            # only legacy exists -> legacy honored (un-migrated install keeps working)
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text('{"vault": "x"}', encoding="utf-8")
+            check("legacy-only resolves legacy", kb_config.workspaces_path() == legacy)
+
+            # both exist -> canonical wins (no split-brain: read==write path)
+            canonical.parent.mkdir(parents=True)
+            canonical.write_text('{"vault": "y"}', encoding="utf-8")
+            check("canonical beats legacy", kb_config.workspaces_path() == canonical)
+            check("load_config follows the resolved path", kb_config.load_config().get("vault") == "y")
+        finally:
+            _restore_home(prev)
+            if prev_kbh is not None:
+                os.environ["KB_HOME"] = prev_kbh
+
+
 def main():
     test_validate()
     test_write_merges_and_preserves()
     test_write_creates_when_absent()
     test_write_refuses_invalid()
     test_write_refuses_malformed_existing()
+    test_home_and_config_resolution()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

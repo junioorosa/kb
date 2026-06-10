@@ -23,8 +23,8 @@
 
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
 
-$ClaudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
-$StateDir  = Join-Path $ClaudeDir "state"
+$KbHome   = if ($env:KB_HOME) { $env:KB_HOME } else { Join-Path $HOME ".kb" }
+$StateDir  = Join-Path $KbHome "state"
 $Esc       = [char]27
 
 # Unicode glyphs as char codes (ASCII source -> Unicode at runtime)

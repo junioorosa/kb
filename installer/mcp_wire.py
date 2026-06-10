@@ -55,11 +55,32 @@ def _posix(p: Path | str) -> str:
     return str(p).replace("\\", "/")
 
 
-def server_command(claude_dir: Path) -> dict:
+def server_command(kb_dir: Path) -> dict:
     return {
         "command": _posix(sys.executable),
-        "args": [_posix(Path(claude_dir) / "hooks" / "kb.py"), "mcp"],
+        "args": [_posix(Path(kb_dir) / "engine" / "kb.py"), "mcp"],
     }
+
+
+def _is_our_stale_entry(entry, server: dict) -> bool:
+    """True when an existing `kb` entry is OURS but points at a previous KB
+    layout (pre-0.11 ~/.claude/hooks/kb.py, or an engine/kb.py under a moved KB
+    home). Only such entries are ever rewritten; anything else a user wrote by
+    hand keeps the never-overwrite guarantee."""
+    if not isinstance(entry, dict):
+        return False
+    args = entry.get("args")
+    if not isinstance(args, list) or "mcp" not in args:
+        return False
+    if entry.get("command") == server["command"] and args == server["args"]:
+        return False  # current, nothing to do
+    for a in args:
+        a = str(a)
+        if a.endswith("/hooks/kb.py") and "/.claude/" in a:
+            return True
+        if a.endswith("/engine/kb.py"):
+            return True
+    return False
 
 
 def _desktop_config(home: Path, appdata: Path, local_packages: Path) -> Path:
@@ -129,7 +150,9 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def wire_json(cfg_path: Path, key: str, server: dict, dry_run: bool) -> dict:
-    """Additively add <key>.kb to a JSON config. Never mutates an existing entry."""
+    """Additively add <key>.kb to a JSON config. An existing entry is only ever
+    touched when it is recognizably OUR OWN stale wiring (_is_our_stale_entry);
+    foreign/divergent entries are never mutated."""
     rep = {"status": "wired", "config": str(cfg_path), "backup": None}
     data: dict = {}
     if cfg_path.exists():
@@ -145,6 +168,15 @@ def wire_json(cfg_path: Path, key: str, server: dict, dry_run: bool) -> dict:
             return rep
     servers = data.get(key)
     if isinstance(servers, dict) and "kb" in servers:
+        if _is_our_stale_entry(servers.get("kb"), server):
+            if dry_run:
+                rep["status"] = "would-update"
+                return rep
+            servers["kb"] = server
+            rep["status"] = "updated"
+            rep["backup"] = _backup(cfg_path)
+            _atomic_write(cfg_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            return rep
         rep["status"] = "already"
         return rep
     if dry_run:
@@ -181,7 +213,10 @@ def wire_toml(cfg_path: Path, server: dict, dry_run: bool) -> dict:
             rep["status"] = "refused-malformed"
             rep["error"] = f"not valid TOML, left untouched: {e}"
             return rep
-        if "kb" in (data.get("mcp_servers") or {}):
+        existing = (data.get("mcp_servers") or {}).get("kb")
+        if existing is not None:
+            if _is_our_stale_entry(existing, server):
+                return _update_toml_kb(cfg_path, text, server, dry_run, rep)
             rep["status"] = "already"
             return rep
     if dry_run:
@@ -204,6 +239,46 @@ def wire_toml(cfg_path: Path, server: dict, dry_run: bool) -> dict:
     rep["backup"] = _backup(cfg_path)
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(cfg_path, new_text)
+    return rep
+
+
+def _update_toml_kb(cfg_path: Path, text: str, server: dict, dry_run: bool, rep: dict) -> dict:
+    """Rewrite command/args inside OUR [mcp_servers.kb] table (stale layout).
+    Line-targeted: only lines between the table header and the next table are
+    touched, and the result must re-parse with the new args or nothing lands."""
+    if dry_run:
+        rep["status"] = "would-update"
+        return rep
+    lines = text.splitlines(keepends=True)
+    out, in_kb = [], False
+    for ln in lines:
+        stripped = ln.strip()
+        if stripped.startswith("["):
+            in_kb = stripped == "[mcp_servers.kb]"
+            out.append(ln)
+            continue
+        if in_kb and stripped.startswith("command"):
+            out.append(f"command = {json.dumps(server['command'])}\n")
+            continue
+        if in_kb and stripped.startswith("args"):
+            args = ", ".join(json.dumps(a) for a in server["args"])
+            out.append(f"args = [{args}]\n")
+            continue
+        out.append(ln)
+    new_text = "".join(out)
+    try:
+        parsed = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as e:
+        rep["status"] = "error"
+        rep["error"] = f"updated TOML would not parse, aborted: {e}"
+        return rep
+    if (parsed.get("mcp_servers") or {}).get("kb", {}).get("args") != server["args"]:
+        rep["status"] = "error"
+        rep["error"] = "update did not land as expected, aborted"
+        return rep
+    rep["backup"] = _backup(cfg_path)
+    _atomic_write(cfg_path, new_text)
+    rep["status"] = "updated"
     return rep
 
 

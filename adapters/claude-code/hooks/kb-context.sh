@@ -12,7 +12,9 @@
 set -u
 
 # ========== KILL-SWITCH ==========
-[ -f "$HOME/.claude/kb-hooks-disabled" ] && exit 0
+KB="${KB_HOME:-$HOME/.kb}"
+[ -f "$KB/hooks-disabled" ] && exit 0
+[ -f "$HOME/.claude/kb-hooks-disabled" ] && exit 0  # legacy kill-switch, still honored
 [ "${KB_HOOKS_DISABLED:-0}" = "1" ] && exit 0
 
 # ========== BRANCH (additive ticket context — not a gate) ==========
@@ -37,7 +39,8 @@ fi
 # `kb retrieve` reads this stdin payload and prints the <vault-context>. The
 # retrieval pipeline still lives in kb_retrieve.py (imported by the CLI), which
 # also stays runnable standalone for back-compat.
-SCRIPT="$HOME/.claude/hooks/kb.py"
+SCRIPT="$KB/engine/kb.py"
+[ -f "$SCRIPT" ] || SCRIPT="$HOME/.claude/hooks/kb.py"  # pre-0.11 layout
 [ -f "$SCRIPT" ] || exit 0
 
 exec "$PY" "$SCRIPT" retrieve

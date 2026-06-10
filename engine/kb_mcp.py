@@ -37,7 +37,8 @@ MAX_READ_BYTES = 64_000
 def _server_version() -> str:
     """Installed KB version (stamped by the installer), or 'dev' from the repo."""
     try:
-        stamp = kbr.HOME / ".claude" / ".kb-version"
+        import kb_config
+        stamp = kb_config.kb_home() / ".version"
         if stamp.exists():
             return stamp.read_text(encoding="utf-8").strip() or "dev"
     except OSError:
@@ -205,7 +206,8 @@ def tool_kb_mark(args: dict) -> str:
     nonce = secrets.token_hex(4)
     sid = f"mcp-{nonce}"
     token = f"KB-MARK:{branch}:{nonce}"
-    state_dir = kbr.HOME / ".claude" / "state"
+    import kb_config
+    state_dir = kb_config.state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "session_id": sid,

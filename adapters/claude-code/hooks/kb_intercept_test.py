@@ -9,7 +9,7 @@ key facts. Assertions are on semantics/substrings, not exact wording, so a
 message-polish pass stays green as long as behaviour is preserved.
 
 Run:  python kb_intercept_test.py   (exit 0 all green, 1 on any failure)
-Isolated: never touches the real ~/.claude state or the real vault.
+Isolated: never touches the real KB state or the real vault.
 """
 from __future__ import annotations
 
@@ -59,12 +59,12 @@ def run(script: Path, payload: dict, home: Path, vault: Path | None = None,
 
 
 def sidecar(home: Path, sid: str) -> dict:
-    f = home / ".claude" / "state" / f"kb-session-branch-{sid}.json"
+    f = home / ".kb" / "state" / f"kb-session-branch-{sid}.json"
     return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
 
 
 def write_state(home: Path, name: str, data: dict) -> None:
-    d = home / ".claude" / "state"
+    d = home / ".kb" / "state"
     d.mkdir(parents=True, exist_ok=True)
     (d / name).write_text(json.dumps(data), encoding="utf-8")
 

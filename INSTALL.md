@@ -43,8 +43,9 @@ bash <repo>/installer/install.sh --apply
 powershell -ExecutionPolicy Bypass -File <repo>\installer\install.ps1 -Apply
 ```
 
-What it does (all idempotent, every overwrite backed up): deploys the engine
-into `~/.claude`, merges the Claude Code hooks into `settings.json`
+What it does (all idempotent, every overwrite backed up): migrates a pre-0.11
+install from `~/.claude` to `~/.kb`, deploys the engine into `~/.kb/engine`,
+merges the Claude Code hooks into `settings.json`
 (additively — foreign hooks untouched), wires the KB MCP server into every
 detected host (Codex / Cursor / Claude Desktop / Gemini / Windsurf; skip with
 `--no-mcp-wire`), registers the nightly sync job, stamps the version.
@@ -54,12 +55,12 @@ diff and writes nothing.
 
 ## 3. Configure (first install only)
 
-KB **never guesses** the vault path. If `~/.claude/kb-workspaces.json` is
-missing, the installer says so — then either:
+KB **never guesses** the vault path. If `~/.kb/config.json` is missing, the
+installer says so — then either:
 
 - open the manager (`python <repo>/manager/server.py` or the "KB Manager"
   shortcut) and set the vault + workspaces in the UI, or
-- copy `<repo>/config.example.json` to `~/.claude/kb-workspaces.json` and set
+- copy `<repo>/config.example.json` to `~/.kb/config.json` and set
   `vault` (an existing folder you create for it, e.g. `~/.kb/vault` after
   `git init`) and `workspaces` (folders holding the user's code repos).
 
@@ -68,7 +69,7 @@ Until the vault is set, hooks stay silent by design — nothing breaks.
 ## 4. Verify
 
 ```bash
-python ~/.claude/hooks/kb.py doctor          # vault + config resolve loudly
+python ~/.kb/engine/kb.py doctor             # vault + config resolve loudly
 python <repo>/installer/install.py --status  # version, scheduler, config
 ```
 
@@ -76,13 +77,13 @@ Hook smoke test (should print a `<vault-context>` block when the vault has
 content; silence is CORRECT for an empty/unset vault):
 
 ```bash
-echo '{"prompt": "test retrieval", "session_id": "smoke"}' | "C:\Program Files\Git\bin\bash.exe" ~/.claude/hooks/kb-context.sh
+echo '{"prompt": "test retrieval", "session_id": "smoke"}' | "C:\Program Files\Git\bin\bash.exe" ~/.kb/engine/kb-context.sh
 ```
 
 MCP smoke test (should answer one JSON line with `serverInfo`):
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' | python ~/.claude/hooks/kb.py mcp
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' | python ~/.kb/engine/kb.py mcp
 ```
 
 ## 5. When something is broken
@@ -98,7 +99,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 | Update wanted | — | re-run step 1 (pull) + step 2; or `install.py --update` (fast-forward + redeploy) |
 
 Backups: every deploy keeps a restorable copy under
-`~/.claude/.kb-backups/deploy-<timestamp>/`; every touched host config gets a
+`~/.kb/backups/deploy-<timestamp>/`; every touched host config gets a
 sibling `*.kb-bak-<timestamp>` file. Nothing the installer does is one-way.
 
 ## Rules for agents
