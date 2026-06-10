@@ -32,7 +32,11 @@ def check(name, cond, extra=""):
 
 
 def wire(home: Path, cdir: Path, dry_run=False):
+    # local_packages MUST be injected too: without it the MSIX fallback would
+    # scan the real %LOCALAPPDATA%\Packages and wire the machine's actual
+    # Claude Desktop from inside the test suite.
     return mcp_wire.wire_all(cdir, home=home, appdata=home / "AppData" / "Roaming",
+                             local_packages=home / "AppData" / "Local" / "Packages",
                              dry_run=dry_run)
 
 
@@ -116,7 +120,8 @@ def main() -> int:
         home5 = tmp / "home5"
         appdata = home5 / "AppData" / "Roaming"
         (appdata / "Claude").mkdir(parents=True)
-        rep = mcp_wire.wire_all(cdir, home=home5, appdata=appdata)
+        rep = mcp_wire.wire_all(cdir, home=home5, appdata=appdata,
+                                local_packages=home5 / "AppData" / "Local" / "Packages")
         cd = rep["hosts"]["claude-desktop"]
         if sys.platform == "win32":
             check("desktop wired under APPDATA", cd["status"] == "wired", str(cd))
@@ -126,6 +131,30 @@ def main() -> int:
         else:
             check("skipped (non-windows desktop path)", True)
             check("skipped (non-windows desktop path)", True)
+
+        print("test_claude_desktop_msix_layout")
+        home5b = tmp / "home5b"
+        pkgs = home5b / "AppData" / "Local" / "Packages"
+        msix_cfg_dir = pkgs / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude"
+        msix_cfg_dir.mkdir(parents=True)
+        rep = mcp_wire.wire_all(cdir, home=home5b, appdata=home5b / "AppData" / "Roaming",
+                                local_packages=pkgs)
+        cd = rep["hosts"]["claude-desktop"]
+        if sys.platform == "win32":
+            check("MSIX desktop detected and wired", cd["status"] == "wired", str(cd))
+            cfg = msix_cfg_dir / "claude_desktop_config.json"
+            check("config written inside the virtualized AppData", cfg.is_file()
+                  and "kb" in json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"])
+            # precedence: when BOTH layouts exist, the classic one wins
+            (home5b / "AppData" / "Roaming" / "Claude").mkdir(parents=True)
+            spec = next(s for s in mcp_wire.host_specs(
+                home5b, home5b / "AppData" / "Roaming", pkgs) if s["name"] == "claude-desktop")
+            check("classic location wins over MSIX when both exist",
+                  "Packages" not in str(spec["config"]))
+        else:
+            check("skipped (non-windows msix path)", True)
+            check("skipped (non-windows msix path)", True)
+            check("skipped (non-windows msix path)", True)
 
         # ---- TOML host (codex) ----------------------------------------------
         print("test_toml_fresh")

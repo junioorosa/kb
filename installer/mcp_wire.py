@@ -13,6 +13,8 @@ Hosts and their config surfaces:
   codex           ~/.codex/config.toml             [mcp_servers.kb]   (TOML)
   cursor          ~/.cursor/mcp.json               mcpServers.kb      (JSON)
   claude-desktop  <per-OS>/Claude/claude_desktop_config.json          (JSON)
+                  (Windows Store/MSIX builds virtualize it under
+                   %LOCALAPPDATA%/Packages/Claude_*/LocalCache/Roaming/Claude/)
   gemini          ~/.gemini/settings.json          mcpServers.kb      (JSON)
   windsurf        ~/.codeium/windsurf/mcp_config.json                 (JSON)
 
@@ -60,18 +62,42 @@ def server_command(claude_dir: Path) -> dict:
     }
 
 
-def host_specs(home: Path | None = None, appdata: Path | None = None) -> list[dict]:
-    """The known hosts. `home`/`appdata` are injectable for tests."""
+def _desktop_config(home: Path, appdata: Path, local_packages: Path) -> Path:
+    """Claude Desktop's config file, accounting for both install flavors.
+
+    Classic installs keep it at <per-OS roaming>/Claude/. The Microsoft Store
+    (MSIX) build virtualizes AppData, so the SAME file lives under
+    Packages/Claude_<family>/LocalCache/Roaming/Claude/ instead. Prefer the
+    classic location when present; fall back to a detected MSIX package; else
+    return the classic path (whose absent parent reads as not-detected)."""
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    if os.name != "nt":
+        return home / ".config" / "Claude" / "claude_desktop_config.json"
+    classic = Path(appdata) / "Claude" / "claude_desktop_config.json"
+    if classic.parent.is_dir():
+        return classic
+    try:
+        for pkg in sorted(Path(local_packages).glob("Claude_*")):
+            cand = pkg / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json"
+            if cand.parent.is_dir():
+                return cand
+    except OSError:
+        pass
+    return classic
+
+
+def host_specs(home: Path | None = None, appdata: Path | None = None,
+               local_packages: Path | None = None) -> list[dict]:
+    """The known hosts. `home`/`appdata`/`local_packages` are injectable for tests."""
     home = Path(home) if home else Path.home()
     if appdata is None:
         env = os.environ.get("APPDATA", "")
         appdata = Path(env) if env else home / "AppData" / "Roaming"
-    if sys.platform == "darwin":
-        desktop_cfg = home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-    elif os.name == "nt":
-        desktop_cfg = Path(appdata) / "Claude" / "claude_desktop_config.json"
-    else:
-        desktop_cfg = home / ".config" / "Claude" / "claude_desktop_config.json"
+    if local_packages is None:
+        env = os.environ.get("LOCALAPPDATA", "")
+        local_packages = (Path(env) if env else home / "AppData" / "Local") / "Packages"
+    desktop_cfg = _desktop_config(home, Path(appdata), Path(local_packages))
     return [
         {"name": "codex", "kind": "toml", "detect": home / ".codex",
          "config": home / ".codex" / "config.toml",
@@ -201,11 +227,11 @@ def wire_agents_md(path: Path, dry_run: bool) -> dict:
 
 
 def wire_all(claude_dir: Path, home: Path | None = None, appdata: Path | None = None,
-             dry_run: bool = False) -> dict:
+             local_packages: Path | None = None, dry_run: bool = False) -> dict:
     """Detect installed hosts and wire each. Absent hosts are never created."""
     server = server_command(Path(claude_dir))
     report = {"server": server, "hosts": {}}
-    for spec in host_specs(home, appdata):
+    for spec in host_specs(home, appdata, local_packages):
         if not spec["detect"].is_dir():
             report["hosts"][spec["name"]] = {"status": "not-detected"}
             continue
