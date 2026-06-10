@@ -121,9 +121,107 @@ def save_session_offsets(data: dict) -> None:
     SESSION_OFFSETS.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def find_sessions_for_branch(branch: str) -> list[dict]:
-    """Returns sessions where the SessionStart sidecar maps to this branch.
+def transcript_stores() -> list[Path]:
+    """Directories holding OTHER hosts' session logs, for token-marked sessions.
 
+    Config key `transcript_stores` (list of paths) in the workspaces config;
+    default: ~/.codex/sessions when it exists. The Claude Code transcripts in
+    ~/.claude/projects are NOT a store — they resolve by session_id directly.
+    """
+    stores: list[Path] = []
+    try:
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8")) if CONFIG.exists() else {}
+        for p in cfg.get("transcript_stores", []) or []:
+            if isinstance(p, str) and p.strip():
+                stores.append(Path(os.path.expanduser(p.strip())))
+    except Exception:
+        pass
+    if not stores:
+        codex = Path.home() / ".codex" / "sessions"
+        if codex.is_dir():
+            stores.append(codex)
+    return [s for s in stores if s.is_dir()]
+
+
+def _read_store_file_text(path: Path) -> str | None:
+    """Text of a session-log file; transparently decompresses .zst when the
+    stdlib codec exists (Python 3.14+). None = unreadable here, skip."""
+    try:
+        if path.suffix == ".zst":
+            try:
+                from compression import zstd  # Python 3.14+
+            except ImportError:
+                return None
+            return zstd.decompress(path.read_bytes()).decode("utf-8", errors="ignore")
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+
+
+def resolve_marked_transcript(data: dict, sidecar: Path) -> Path | None:
+    """Locate the session log holding this sidecar's mark token.
+
+    The deterministic key is the token itself: the `kb_mark` MCP tool returned
+    it as a tool result, so the host persisted it inside the session log — the
+    file that CONTAINS the token IS the marked session, whatever the format.
+    The found path is cached on the sidecar so later syncs don't re-scan.
+    .zst logs are mirrored decompressed under STATE_DIR/kb-transcripts so the
+    whole downstream (line hints, offsets, Read) keeps working on plain text.
+    """
+    token = data.get("mark_token", "")
+    if not token:
+        return None
+    cached = data.get("transcript_path", "")
+    if cached and Path(cached).is_file():
+        return Path(cached)
+
+    # Only look at files that could contain a mark made at `marked_at` (with a
+    # generous margin) — keeps the scan cheap on big stores.
+    floor = 0.0
+    marked_at = data.get("marked_at", "")
+    if marked_at:
+        try:
+            floor = time.mktime(time.strptime(marked_at[:19], "%Y-%m-%dT%H:%M:%S")) - 86400
+        except Exception:
+            floor = 0.0
+
+    for store in transcript_stores():
+        for f in sorted(store.rglob("*.jsonl*")):
+            name = f.name.lower()
+            if not (name.endswith(".jsonl") or name.endswith(".jsonl.zst")):
+                continue
+            try:
+                if floor and f.stat().st_mtime < floor:
+                    continue
+            except OSError:
+                continue
+            text = _read_store_file_text(f)
+            if text is None or token not in text:
+                continue
+            found = f
+            if f.suffix == ".zst":
+                mirror_dir = STATE_DIR / "kb-transcripts"
+                mirror_dir.mkdir(parents=True, exist_ok=True)
+                mirror = mirror_dir / f"{data.get('session_id', 'marked')}.jsonl"
+                mirror.write_text(text, encoding="utf-8")
+                found = mirror
+            data["transcript_path"] = str(found)
+            try:
+                sidecar.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
+            return found
+    return None
+
+
+def find_sessions_for_branch(branch: str) -> list[dict]:
+    """Returns sessions where the session sidecar maps to this branch.
+
+    Two resolution paths, one per adapter family:
+      * Claude Code sidecars carry the host session_id -> the transcript lives
+        at a deterministic path under PROJECTS_DIR.
+      * Token-marked sidecars (the `kb_mark` MCP tool, any host) carry a
+        mark_token -> the transcript is whichever store file contains it.
     Each entry: {session_id, jsonl_path (Path or None), cwd}.
     """
     out = []
@@ -138,6 +236,15 @@ def find_sessions_for_branch(branch: str) -> list[dict]:
             continue
         sid = data.get("session_id", "")
         cwd = data.get("cwd", "")
+        if data.get("mark_token"):
+            jsonl = resolve_marked_transcript(data, sidecar)
+            if sid:
+                out.append({
+                    "session_id": sid,
+                    "cwd": cwd,
+                    "jsonl_path": jsonl,
+                })
+            continue
         if not sid or not cwd:
             continue
         jsonl = PROJECTS_DIR / encode_cwd(cwd) / f"{sid}.jsonl"

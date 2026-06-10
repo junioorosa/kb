@@ -6,6 +6,7 @@
   "default_branches": ["master", "main"],
   "integration_branches": ["master", "dev", "develop", "main"],
   "production_branches": ["master", "main"],
+  "transcript_stores": ["~/.codex/sessions"],
   "since_hours": 24,
   "max_turns": 30
 }

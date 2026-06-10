@@ -15,13 +15,17 @@ Tools:
   kb_search(query, k)  — ranked vault notes (hybrid cosine+BM25, BM25 fallback)
   kb_context(prompt)   — the same <vault-context> block the push hook injects
   kb_read(path)        — full body of one note, sandboxed to the vault
+  kb_mark(branch)      — mark THIS session under a branch via a token the host
+                         persists in its own session log (sync greps it later)
 
 Run:  kb mcp   (or: python kb_mcp.py)
 """
 from __future__ import annotations
 
 import json
+import secrets
 import sys
+import time
 from pathlib import Path
 
 import kb_retrieve as kbr
@@ -94,6 +98,25 @@ TOOLS = [
                 "path": {"type": "string", "description": "Vault-relative note path, e.g. ws/project/Learnings/note.md"},
             },
             "required": ["path"],
+        },
+    },
+    {
+        "name": "kb_mark",
+        "description": (
+            "Mark THIS session's work under a git branch so the nightly KB sync "
+            "captures the conversation as knowledge. Call it when the user asks "
+            "to track/mark the session (e.g. says 'kb mark'). It returns a mark "
+            "token; because this tool result is persisted in the host's own "
+            "session log, the sync finds this exact conversation by that token — "
+            "no host session id needed. Mention the token once in your reply."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "branch": {"type": "string", "description": "The git branch this session's work belongs to, e.g. feat/my-feature."},
+                "cwd": {"type": "string", "description": "Optional: absolute path of the repo being worked on."},
+            },
+            "required": ["branch"],
         },
     },
 ]
@@ -175,10 +198,39 @@ def tool_kb_read(args: dict) -> str:
     return text
 
 
+def tool_kb_mark(args: dict) -> str:
+    branch = (args.get("branch") or "").strip()
+    if not branch:
+        raise ValueError("branch is required")
+    nonce = secrets.token_hex(4)
+    sid = f"mcp-{nonce}"
+    token = f"KB-MARK:{branch}:{nonce}"
+    state_dir = kbr.HOME / ".claude" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    data = {
+        "session_id": sid,
+        "branch": branch,
+        "cwd": (args.get("cwd") or "").strip(),
+        "mark_token": token,
+        "marked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "manual_override": True,
+    }
+    (state_dir / f"kb-session-branch-{sid}.json").write_text(
+        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return (
+        f"Session marked under \"{branch}\".\n"
+        f"Mark token: {token}\n"
+        f"This tool result is now part of the session log — that's how the "
+        f"nightly sync locates this conversation. Mention the token once in "
+        f"your reply to the user as extra anchoring."
+    )
+
+
 TOOL_IMPL = {
     "kb_search": tool_kb_search,
     "kb_context": tool_kb_context,
     "kb_read": tool_kb_read,
+    "kb_mark": tool_kb_mark,
 }
 
 
