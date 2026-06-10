@@ -62,6 +62,7 @@ async function loadStatus() {
   } else {
     $("st-vault").innerHTML = dot("warn") + "not configured";
   }
+  applySetupState(cfg);
 
   // daemon
   const d = st.daemon || {};
@@ -318,6 +319,23 @@ function switchView(view) {
   $("view-config").classList.toggle("hidden", view !== "config");
   $("view-knowledge").classList.toggle("hidden", view !== "knowledge");
   if (view === "knowledge" && !KN_LOADED) { KN_LOADED = true; loadKnowledge(); }
+}
+
+// --- First-run setup state ---------------------------------------------------
+// An unconfigured KB (no vault) shows a banner on the Config view and a dot on
+// its tab, and the FIRST status load lands there instead of Knowledge (which
+// would be empty anyway). Only the initial load redirects: later refreshes —
+// e.g. right after saving the vault — just clear the banner without yanking
+// the user away from wherever they are.
+let _setupRedirected = false;
+function applySetupState(cfg) {
+  const needsSetup = !(cfg.present && cfg.vault);
+  $("setup-banner").classList.toggle("hidden", !needsSetup);
+  $("config-badge").classList.toggle("hidden", !needsSetup);
+  if (needsSetup && !_setupRedirected) {
+    _setupRedirected = true;
+    switchView("config");
+  }
 }
 
 async function loadKnowledge() {

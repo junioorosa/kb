@@ -23,10 +23,14 @@
 
     <nav class="tabs">
       <button class="tab is-active" data-view="knowledge">Knowledge</button>
-      <button class="tab" data-view="config">Config</button>
+      <button class="tab" data-view="config">Config<span class="tab-dot hidden" id="config-badge"></span></button>
     </nav>
 
     <div id="view-config" class="view hidden">
+    <div id="setup-banner" class="setup-banner hidden">
+      <b>KB isn't configured yet.</b> Set the <b>vault path</b> below — and add your
+      workspaces — to finish setup. Retrieval and capture stay silent until then.
+    </div>
     <main class="grid">
       <!-- Status -->
       <section class="card">
