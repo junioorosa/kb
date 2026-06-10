@@ -60,11 +60,14 @@ curl -fsSL https://raw.githubusercontent.com/junioorosa/kb/main/bootstrap.sh | b
 irm https://raw.githubusercontent.com/junioorosa/kb/main/bootstrap.ps1 | iex
 ```
 
-> Raw URLs only serve **public** repos — while this repo is private the one-liner has nothing
-> to fetch. Collaborators install with `gh` instead (it carries their GitHub auth):
-> `gh repo clone junioorosa/kb ~/.kb/app`, then `bash ~/.kb/app/bootstrap.sh` (it detects the
-> existing clone, updates it, and runs the installer). The script also falls back to `gh` on
-> its own when a plain clone of a private `KB_REPO` is rejected.
+> Installing from a **private** clone or fork? Raw URLs won't serve it — use `gh` (it carries
+> your GitHub auth): `gh repo clone <owner>/kb ~/.kb/app`, then `bash ~/.kb/app/bootstrap.sh`
+> (it detects the existing clone, updates it, and runs the installer). The script also falls
+> back to `gh` on its own when a plain clone of a private `KB_REPO` is rejected.
+
+**Agent-driven.** Already in an AI coding tool? Just say: *"Read INSTALL.md and install KB for
+me."* [`INSTALL.md`](INSTALL.md) is a runbook written for agents — prerequisites, install,
+verification, and **repair** when an install breaks.
 
 Already have a clone? The installer alone is enough — it is idempotent: the same command does
 first-install and updates, and re-running is always safe (it diffs, backs up every file it
@@ -88,9 +91,11 @@ powershell -ExecutionPolicy Bypass -File installer\install.ps1 -Apply
 bash installer/install.sh --apply
 ```
 
-That wires the Claude Code hooks, registers a daily capture job, and opens the manager so you
-can point KB at your vault and code folders. Requirements: **Python 3.x** (the bootstrap also
-installs the optional `fastembed`, `numpy`, `tiktoken` — see [Requirements](#requirements)).
+That wires the Claude Code hooks, **wires the KB MCP server into every detected host**
+(Codex CLI, Cursor, Claude Desktop, Gemini CLI, Windsurf — additively, backed up, skippable
+with `--no-mcp-wire`), registers a daily capture job, and opens the manager so you can point
+KB at your vault and code folders. Requirements: **Python 3.x** (the bootstrap also installs
+the optional `fastembed`, `numpy`, `tiktoken` — see [Requirements](#requirements)).
 
 Flags (daily time, skip the manager auto-launch), status, and rollback are in
 [`installer/README.md`](installer/README.md).
@@ -135,7 +140,10 @@ context instead of having it pushed. Four tools: `kb_search` (ranked notes), `kb
 (the same block the hook injects), `kb_read` (one note's body, sandboxed to the vault) and
 `kb_mark` (tie the session to a branch for capture — see below).
 
-Point your host at the deployed CLI (`<home>/.claude/hooks/kb.py mcp`):
+**The installer wires detected hosts automatically** (Codex, Cursor, Claude Desktop, Gemini,
+Windsurf — `--no-mcp-wire` to opt out; on Codex it also drops a when-to-use note into the
+global `AGENTS.md`). For manual setup or any other MCP host, point it at the deployed CLI
+(`<home>/.claude/hooks/kb.py mcp`):
 
 ```jsonc
 // Cursor (.cursor/mcp.json) / Claude Desktop (claude_desktop_config.json)
