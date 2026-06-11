@@ -208,10 +208,16 @@ KB is built so your knowledge never leaves your machine by accident:
 
 ## Requirements
 
-Python 3.x. Optional, installed by the bootstrap and all degrade gracefully if absent:
+Python 3.x. The bootstrap creates a private virtualenv at `~/.kb/venv` and
+installs the optional deps there — never the system Python, which modern distros
+and Homebrew mark PEP 668 "externally managed" (`pip install` is refused). All
+degrade gracefully if absent:
 
 - `fastembed` + `numpy` — semantic retrieval (falls back to BM25 lexical search).
 - `tiktoken` — exact token stats (falls back to an estimate).
+
+> Debian/Ubuntu need the venv module present: `sudo apt install python3-venv`.
+> Without it the installer warns and continues with lexical-only (BM25) retrieval.
 
 ## Layout
 
