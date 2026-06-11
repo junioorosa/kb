@@ -12,7 +12,7 @@ Check, and fix only what's missing:
 | Need | Check | Fix |
 |------|-------|-----|
 | git | `git --version` | install via the OS package manager (`winget install Git.Git` / `brew install git` / `apt install git`) |
-| Python 3.10+ | `python --version` (or `python3`) | `winget install Python.Python.3.12` / `brew install python` / `apt install python3` |
+| Python 3.10+ | `python --version` (or `python3`) | `winget install Python.Python.3.12` / `brew install python` / `apt install python3 python3-venv` |
 | Git Bash (Windows only) | `Test-Path "C:\Program Files\Git\bin\bash.exe"` | comes with Git for Windows |
 
 > **Windows trap:** `bash` on PATH usually resolves to the WSL launcher
@@ -97,7 +97,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 | Hooks never fire, no `<vault-context>` ever | vault not configured | step 3; confirm with `kb doctor` |
 | Hook exits instantly, silent | invoked via WSL bash (`System32\bash.exe`) | use the Git Bash full path (see step 0) |
 | installer says settings.json is invalid | the file was hand-edited into broken JSON | fix the JSON by hand (the installer REFUSES to touch a malformed file — that's deliberate); its backups live beside it as `settings.json.kb-bak-*` |
-| Retrieval works but feels lexical-only | `fastembed`/`numpy` missing or daemon down | `pip install fastembed numpy`; the daemon auto-spawns on the next prompt |
+| Retrieval works but feels lexical-only | deps missing (venv not created) or daemon down | re-run the installer — it creates `~/.kb/venv` and installs the deps there (Debian/Ubuntu first need `sudo apt install python3-venv`); the daemon auto-spawns on the next prompt |
 | An MCP host doesn't list the kb server | host installed after KB, or wiring opted out | re-run step 2 (wire is idempotent), then restart the host app |
 | A deploy went wrong | — | `python <repo>/installer/install.py --rollback` restores the latest backup |
 | Update wanted | — | re-run step 1 (pull) + step 2; or `install.py --update` (fast-forward + redeploy) |

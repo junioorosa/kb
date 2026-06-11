@@ -16,9 +16,25 @@ KB="${KB_HOME:-$HOME/.kb}"
 
 LOCK="$KB/state/kb-embed-daemon.lock"
 
+# Resolve the interpreter up front (the probes below use it too): KB_PYTHON,
+# then the managed venv where the optional deps live, then PATH. Bare `python`
+# does not exist on the many systems that ship only `python3`.
+PY="${KB_PYTHON:-}"
+if [ -z "$PY" ]; then
+  for cand in "$KB/venv/bin/python" "$KB/venv/Scripts/python.exe"; do
+    [ -x "$cand" ] && { PY="$cand"; break; }
+  done
+fi
+if [ -z "$PY" ]; then
+  if command -v python >/dev/null 2>&1; then PY=python
+  elif command -v python3 >/dev/null 2>&1; then PY=python3
+  else exit 0
+  fi
+fi
+
 # Already running? Verify lockfile and that something answers the port.
 if [ -f "$LOCK" ]; then
-  PORT=$(python -c "import json,sys
+  PORT=$("$PY" -c "import json,sys
 try:
     d=json.load(open(r'$LOCK',encoding='utf-8'))
     print(d.get('port',''))
@@ -26,7 +42,7 @@ except Exception:
     pass" 2>/dev/null)
   if [ -n "$PORT" ]; then
     # quick TCP probe; if anything answers, assume alive
-    if python -c "
+    if "$PY" -c "
 import socket
 s=socket.socket(); s.settimeout(0.4)
 try:
@@ -43,17 +59,6 @@ finally:
   # Lock present but nobody answered. Leave it in place: the daemon's main()
   # reads the recorded pid to terminate the defunct owner (socket gone after
   # sleep/resume) and rebind. Removing it here would discard that pid.
-fi
-
-PY="${KB_PYTHON:-}"
-if [ -z "$PY" ]; then
-  if command -v python >/dev/null 2>&1; then
-    PY=python
-  elif command -v python3 >/dev/null 2>&1; then
-    PY=python3
-  else
-    exit 0
-  fi
 fi
 
 DAEMON="$KB/engine/kb-embed-daemon.py"

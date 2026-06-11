@@ -25,6 +25,13 @@ export KB_BRANCH
 
 # ========== PYTHON DISPATCH ==========
 PY="${KB_PYTHON:-}"
+# Prefer the managed venv (installer/install.sh) before PATH python — that's
+# where the optional deps live on PEP 668 / externally-managed systems.
+if [ -z "$PY" ]; then
+  for cand in "$KB/venv/bin/python" "$KB/venv/Scripts/python.exe"; do
+    [ -x "$cand" ] && { PY="$cand"; break; }
+  done
+fi
 if [ -z "$PY" ]; then
   if command -v python >/dev/null 2>&1; then
     PY=python
