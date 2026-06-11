@@ -11,7 +11,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from settings_merge import merge_settings, SettingsMergeError, kb_desired_hooks  # noqa: E402
+from settings_merge import (  # noqa: E402
+    merge_settings, SettingsMergeError, kb_desired_hooks, kb_desired_statusline)
 
 KB_DIR = Path("C:/Users/example/.kb")
 PASS, FAIL = 0, 0
@@ -52,6 +53,8 @@ def test_fresh_install():
         ss = _commands(s, "SessionStart")
         check("daemon-spawn present (sole KB SessionStart hook)", any("kb-embed-daemon-spawn.sh" in c for c in ss))
         check("session-branch NOT registered (manual-only marking)", not any("kb-session-branch.sh" in c for c in ss))
+        check("statusline set on a fresh machine", rep["statusline"] == "set"
+              and "kb-statusline.sh" in s.get("statusLine", {}).get("command", ""))
 
 
 def test_preserves_foreign_hooks():
@@ -83,6 +86,7 @@ def test_preserves_foreign_hooks():
         ss = _commands(s, "SessionStart")
         check("foreign caveman-activate preserved", any("caveman-activate.js" in c for c in ss))
         check("statusLine untouched", s["statusLine"]["command"].endswith("combined-statusline.ps1"))
+        check("foreign statusline reported", rep["statusline"] == "foreign")
         check("backup created (file existed)", rep["backup"] is not None and Path(rep["backup"]).exists())
         check("model key untouched", s.get("model") == "opus")
 
@@ -99,6 +103,7 @@ def test_idempotent():
         check("second run no backup", r2["backup"] is None)
         check("file byte-identical after re-run", p.read_text(encoding="utf-8") == before)
         check("all entries skipped on re-run", len(r2["skipped"]) == 5 and len(r2["added"]) == 0)
+        check("statusline current on re-run", r2["statusline"] == "current")
 
 
 def test_recognizes_localized_variant():
@@ -162,6 +167,44 @@ def test_repoints_stale_own_entry():
         check("repoint is idempotent", not r2["changed"])
 
 
+def test_statusline_repoints_own_stale():
+    print("test_statusline_repoints_own_stale")
+    # A statusLine wired to the legacy PowerShell fragment (or a moved KB home)
+    # contains our key and is OURS: only its command is rewritten; extra fields
+    # the user tuned (padding) survive.
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "settings.json"
+        existing = {
+            "statusLine": {
+                "type": "command",
+                "command": 'powershell -NoProfile -File "C:/Users/example/.claude/hooks/kb-statusline-fragment.ps1"',
+                "padding": 0,
+            },
+        }
+        p.write_text(json.dumps(existing), encoding="utf-8")
+        rep = merge_settings(p, KB_DIR)
+        s = json.loads(p.read_text(encoding="utf-8"))
+        check("reported as updated", rep["statusline"] == "updated")
+        check("command now the bash statusline", s["statusLine"]["command"] ==
+              kb_desired_statusline(KB_DIR)["command"])
+        check("padding survives the repoint", s["statusLine"]["padding"] == 0)
+        r2 = merge_settings(p, KB_DIR)
+        check("statusline repoint is idempotent", r2["statusline"] == "current")
+
+
+def test_statusline_non_dict_is_foreign():
+    print("test_statusline_non_dict_is_foreign")
+    # A statusLine value we don't understand (string, list...) is foreign by
+    # definition: report it, never rewrite it.
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "settings.json"
+        p.write_text(json.dumps({"statusLine": "my-script.sh"}), encoding="utf-8")
+        rep = merge_settings(p, KB_DIR)
+        s = json.loads(p.read_text(encoding="utf-8"))
+        check("non-dict statusline reported foreign", rep["statusline"] == "foreign")
+        check("non-dict statusline untouched", s["statusLine"] == "my-script.sh")
+
+
 def test_refuses_malformed_json():
     print("test_refuses_malformed_json")
     with tempfile.TemporaryDirectory() as d:
@@ -198,6 +241,8 @@ def main():
     test_idempotent()
     test_recognizes_localized_variant()
     test_repoints_stale_own_entry()
+    test_statusline_repoints_own_stale()
+    test_statusline_non_dict_is_foreign()
     test_refuses_malformed_json()
     test_atomic_no_partial_on_existing()
 

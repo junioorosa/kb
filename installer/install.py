@@ -659,6 +659,12 @@ def _summary(rep: dict) -> str:
         lines.append(f"  settings : +{len(s.get('added', []))} added, "
                      f"{len(s.get('updated', []))} repointed, {len(s.get('skipped', []))} present"
                      + (f", backup {s['backup']}" if s.get("backup") else ""))
+        sl = s.get("statusline")
+        if sl == "foreign":
+            lines.append("  statusline: kept yours — compose the KB segment via: "
+                         "bash ~/.kb/engine/kb-statusline.sh --fragment")
+        elif sl in ("set", "updated", "current"):
+            lines.append(f"  statusline: {sl} (kb-statusline.sh)")
     m = rep.get("mcp") or {}
     hosts = m.get("hosts", {})
     wired = [n for n, r in hosts.items() if r.get("status") in ("wired", "would-wire")]

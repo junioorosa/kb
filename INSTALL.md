@@ -46,7 +46,9 @@ powershell -ExecutionPolicy Bypass -File <repo>\installer\install.ps1 -Apply
 What it does (all idempotent, every overwrite backed up): migrates a pre-0.11
 install from `~/.claude` to `~/.kb`, deploys the engine into `~/.kb/engine`,
 merges the Claude Code hooks into `settings.json`
-(additively — foreign hooks untouched), wires the KB MCP server into every
+(additively — foreign hooks untouched; the KB statusline is set only when the
+user has none — an existing statusLine is never overwritten, the summary prints
+the `--fragment` line to compose KB into it), wires the KB MCP server into every
 detected host (Codex / Cursor / Claude Desktop / Gemini / Windsurf; skip with
 `--no-mcp-wire`), registers the nightly sync job, stamps the version. On a
 first install (no config yet) it also opens the manager in the user's browser —

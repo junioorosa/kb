@@ -86,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File installer\install.ps1 -Apply
 bash installer/install.sh --apply
 ```
 
-That wires the Claude Code hooks, **wires the KB MCP server into every detected host**
+That wires the Claude Code hooks and statusline, **wires the KB MCP server into every detected host**
 (Codex CLI, Cursor, Claude Desktop, Gemini CLI, Windsurf — additively, backed up, skippable
 with `--no-mcp-wire`), registers a daily capture job — and on a **first install** (no config
 yet) opens the manager in your browser so you finish by pointing KB at your vault and code
@@ -103,6 +103,7 @@ Flags (daily time, skip the manager auto-launch), status, and rollback are in
 | **Auto-capture** | A nightly sync reads your authored commits **and** the marked session transcript, and distills them into learnings — one markdown file per insight, keyed to the branch. |
 | **On-prompt retrieval** | A hook injects the most relevant past learnings into your agent's context *before* it answers — hybrid semantic + lexical search (local embeddings + BM25), tiered high/mid/low. No API call in the hot path. |
 | **SDLC-anchored** | Knowledge is tied to the unit of work (workspace → project → branch → learning). Merge a branch to production and its ticket auto-resolves; mark a dead end `--experimental` and it's down-weighted. |
+| **Statusline** | `model \| dir \| [KB ✓ B:feat/x H 3/4]` in Claude Code — daemon health, marked branch, last retrieval tier and session hit-rate at a glance. Wired only when you have no statusline yet; already have one? Embed the KB segment with `bash ~/.kb/engine/kb-statusline.sh --fragment`. |
 | **Local-first** | Engine, vault, and manager all run on your machine. The vault is a local-only git repo with no remote. No telemetry. |
 | **Plug-and-play** | One installer wires the hooks and the daily job; a localhost manager app configures everything without hand-editing JSON. |
 | **Degrades gracefully** | No `fastembed`? Retrieval falls back to BM25. No `tiktoken`? Token stats estimate. The embedding daemon down? BM25 fallback. Nothing hard-fails into your prompt. |

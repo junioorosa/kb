@@ -38,9 +38,10 @@ function Color([string]$code, [string]$text) {
     return $Esc + "[38;5;" + $code + "m" + $text + $Esc + "[0m"
 }
 
-# --- Kill switch ------------------------------------------------------------
-$disabledFile = Join-Path $ClaudeDir "kb-hooks-disabled"
-if ((Test-Path -LiteralPath $disabledFile) -or ($env:KB_HOOKS_DISABLED -eq '1')) {
+# --- Kill switch (new flag + legacy location + env) --------------------------
+$disabledNew    = Join-Path $KbHome "hooks-disabled"
+$disabledLegacy = Join-Path $HOME ".claude\kb-hooks-disabled"
+if ((Test-Path -LiteralPath $disabledNew) -or (Test-Path -LiteralPath $disabledLegacy) -or ($env:KB_HOOKS_DISABLED -eq '1')) {
     [Console]::Out.Write((Color "244" ("[KB " + $GlyphCross + "]")))
     exit 0
 }
