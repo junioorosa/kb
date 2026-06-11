@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 
@@ -139,8 +140,10 @@ def resolve_vault(strict: bool = False):
 MANAGED_KEYS = {
     "vault", "workspaces",
     "default_branches", "integration_branches", "production_branches",
-    "since_hours", "max_turns",
+    "since_hours", "max_turns", "sync_times",
 }
+
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 def _is_existing_dir(p) -> bool:
@@ -196,6 +199,12 @@ def validate_config_update(updates: dict) -> list[str]:
             val = updates[key]
             if not (isinstance(val, int) and not isinstance(val, bool) and val > 0):
                 errors.append(f"{key} must be a positive integer")
+
+    if "sync_times" in updates:
+        val = updates["sync_times"]
+        if not (isinstance(val, list) and val
+                and all(isinstance(t, str) and _HHMM_RE.match(t.strip()) for t in val)):
+            errors.append("sync_times must be a non-empty list of 24h 'HH:MM' strings")
 
     unknown = set(updates) - MANAGED_KEYS
     if unknown:

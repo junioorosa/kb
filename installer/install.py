@@ -176,7 +176,21 @@ def step_mcp(kdir: Path, apply: bool) -> dict:
 
 
 def step_scheduler(kdir: Path, apply: bool, time_hhmm: str) -> dict:
-    return scheduler.register(kdir, time_hhmm=time_hhmm, dry_run=not apply)
+    """Register the daily job. The config's `sync_times` (set in the manager,
+    possibly several times a day) wins over the CLI default; an explicit
+    --time on the command line is still honored when no config times exist."""
+    times = time_hhmm
+    cfg = kdir / "config.json"
+    if not cfg.exists():
+        cfg = claude_dir() / "kb-workspaces.json"
+    if cfg.exists():
+        try:
+            cfg_times = json.loads(cfg.read_text(encoding="utf-8")).get("sync_times")
+            if isinstance(cfg_times, list) and cfg_times:
+                times = cfg_times
+        except json.JSONDecodeError:
+            pass
+    return scheduler.register(kdir, time_hhmm=times, dry_run=not apply)
 
 
 def step_shortcut(apply: bool) -> dict:
@@ -659,8 +673,9 @@ def _summary(rep: dict) -> str:
             + (f", PROBLEM: {', '.join(problems)}" if problems else ""))
     lines.append(f"  mcp      : {desc}")
     sc = rep["scheduler"]
-    lines.append(f"  scheduler: {sc.get('os')} task '{sc.get('task', 'kb-sync')}' "
-                 + ("registered" if sc.get("registered") else f"@ {sc.get('time')} (dry-run)"))
+    when = ", ".join(sc.get("times") or [sc.get("time") or "?"])
+    lines.append(f"  scheduler: {sc.get('os')} task '{sc.get('task', 'kb-sync')}' @ {when} "
+                 + ("registered" if sc.get("registered") else "(dry-run)"))
     sh = rep.get("shortcut", {})
     if sh:
         state = ("created" if sh.get("created") else

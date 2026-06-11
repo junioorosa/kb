@@ -220,6 +220,10 @@ async function loadConfig() {
   $("vault-input").value = cfg.vault || "";
   WORKSPACES = Array.isArray(cfg.workspaces) ? cfg.workspaces.map((w) => ({ name: w.name || "", path: w.path || "" })) : [];
   renderWorkspaces();
+  if (Array.isArray(cfg.sync_times) && cfg.sync_times.length) {
+    SCHED_TIMES = cfg.sync_times.slice();
+  }
+  renderSchedTimes();
 }
 
 function renderWorkspaces() {
@@ -281,11 +285,38 @@ async function saveWorkspaces() {
 }
 
 // --- Schedule -------------------------------------------------------------
+// One row per daily time; the native time input is the picker. The list is
+// loaded from the config (sync_times) and saved back through /api/schedule,
+// which persists it AND re-registers the OS job in one go.
+let SCHED_TIMES = ["01:00"];
+
+function renderSchedTimes() {
+  const list = $("sched-list");
+  list.innerHTML = "";
+  SCHED_TIMES.forEach((t, i) => {
+    const row = document.createElement("div");
+    row.className = "sched-row";
+    row.innerHTML =
+      `<input type="time" value="${escapeAttr(t)}" data-i="${i}" />` +
+      (SCHED_TIMES.length > 1 ? `<button class="ws-del" data-del="${i}" title="remove">×</button>` : "");
+    list.appendChild(row);
+  });
+  list.querySelectorAll("input").forEach((inp) => {
+    inp.addEventListener("input", (e) => { SCHED_TIMES[+e.target.dataset.i] = e.target.value; });
+  });
+  list.querySelectorAll(".ws-del").forEach((b) => {
+    b.addEventListener("click", () => { SCHED_TIMES.splice(+b.dataset.del, 1); renderSchedTimes(); });
+  });
+}
+
 async function saveSchedule() {
-  const time = $("sched-input").value;
+  const times = SCHED_TIMES.map((t) => (t || "").trim()).filter(Boolean);
+  if (!times.length) { setMsg("sched-msg", "add at least one time", "err"); return; }
   try {
-    const r = await api("POST", "/api/schedule", { time });
+    const r = await api("POST", "/api/schedule", { times });
     setMsg("sched-msg", r.registered ? "registered" : (r.error || "saved (dry)"), r.registered ? "ok" : "err");
+    SCHED_TIMES = (r.times || times).slice();
+    renderSchedTimes();
     loadStatus();
   } catch (e) { setMsg("sched-msg", e.message, "err"); }
 }
@@ -569,6 +600,8 @@ function init() {
   $("add-ws").addEventListener("click", () => { WORKSPACES.push({ name: "", path: "" }); renderWorkspaces(); });
   $("save-ws").addEventListener("click", saveWorkspaces);
   $("save-sched").addEventListener("click", saveSchedule);
+  $("add-sched").addEventListener("click", () => { SCHED_TIMES.push("12:00"); renderSchedTimes(); });
+  renderSchedTimes();
   $("integ-toggle").addEventListener("change", toggleIntegration);
   $("check-update").addEventListener("click", () => checkUpdate({ manual: true }));
   $("apply-update").addEventListener("click", applyUpdate);

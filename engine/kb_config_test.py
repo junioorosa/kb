@@ -50,6 +50,10 @@ def test_validate():
         check("since_hours zero fails", validate_config_update({"since_hours": 0}) != [])
         check("bool is not a valid int", validate_config_update({"max_turns": True}) != [])
         check("unknown key fails", validate_config_update({"banana": 1}) != [])
+        check("sync_times valid list passes", validate_config_update({"sync_times": ["01:00", "13:30"]}) == [])
+        check("sync_times empty fails", validate_config_update({"sync_times": []}) != [])
+        check("sync_times bad format fails", validate_config_update({"sync_times": ["25:00"]}) != [])
+        check("sync_times non-list fails", validate_config_update({"sync_times": "01:00"}) != [])
 
 
 def _with_home(d):

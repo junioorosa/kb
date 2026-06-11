@@ -312,10 +312,21 @@ class Handler(BaseHTTPRequestHandler):
             out = fs_mkdir(str(body.get("parent") or ""), str(body.get("name") or ""))
             return self._send(400 if "error" in out else 200, out)
         if path == "/api/schedule":
-            t = str(body.get("time", scheduler.DEFAULT_TIME))
-            if not _HHMM.match(t):
-                return self._send(400, {"error": "time must be HH:MM (24h)"})
-            return self._send(200, scheduler.register(install.kb_dir(), time_hhmm=t, dry_run=False))
+            # One or many daily times. Persisted in the config (sync_times) so a
+            # later install --apply re-registers the same schedule, then applied
+            # to the OS scheduler as a single multi-trigger artifact.
+            times = body.get("times")
+            if times is None:
+                times = [body.get("time", scheduler.DEFAULT_TIME)]
+            times = [str(t).strip() for t in times if str(t).strip()]
+            if not times or not all(_HHMM.match(t) for t in times):
+                return self._send(400, {"error": "times must be one or more 24h HH:MM values"})
+            times = sorted(set(times))
+            try:
+                kb_config.write_config({"sync_times": times})
+            except kb_config.KBConfigError as e:
+                return self._send(400, {"error": str(e)})
+            return self._send(200, scheduler.register(install.kb_dir(), time_hhmm=times, dry_run=False))
         if path == "/api/integration":
             return self._send(200, self._integration(bool(body.get("enable", True))))
         if path == "/api/update":

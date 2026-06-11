@@ -102,12 +102,13 @@
       <!-- Schedule -->
       <section class="card">
         <h2>Schedule</h2>
-        <p class="card-sub">Daily time KB syncs from git and reindexes (local time).</p>
-        <label class="field field-narrow">
-          <span>Daily sync time</span>
-          <input type="time" id="sched-input" value="01:00" />
-        </label>
+        <p class="card-sub">Daily times KB syncs from git and reindexes (local time). One is plenty; add more for fresher learnings during the day.</p>
+        <div class="field">
+          <span>Sync times</span>
+          <div id="sched-list" class="sched-list"></div>
+        </div>
         <div class="row">
+          <button class="btn btn-ghost" id="add-sched">+ Add time</button>
           <button class="btn btn-primary" id="save-sched">Save schedule</button>
           <span class="inline-msg" id="sched-msg"></span>
         </div>

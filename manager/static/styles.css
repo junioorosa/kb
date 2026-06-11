@@ -132,6 +132,11 @@ input::placeholder { color: var(--text-faint); }
 .field-browse { display: flex; gap: 8px; align-items: stretch; }
 .field-browse input { flex: 1; margin: 0; }
 
+/* Schedule times */
+.sched-list { display: flex; flex-direction: column; gap: 8px; }
+.sched-row { display: flex; gap: 8px; align-items: center; }
+.sched-row input[type="time"] { max-width: 150px; }
+
 /* Folder picker modal */
 .fs-modal {
   position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
