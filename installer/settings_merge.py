@@ -118,6 +118,21 @@ def kb_desired_hooks(kb_dir: Path) -> dict:
     }
 
 
+# --- statusLine ---------------------------------------------------------------
+# settings.json holds at most ONE statusLine, so this is the one place the merge
+# could collide with the user's own setup. The key below matches both the new
+# kb-statusline.sh and the legacy kb-statusline-fragment.ps1, so an entry
+# containing it is OURS to repoint; anything else is foreign and never touched.
+
+STATUSLINE_KEY = "kb-statusline"
+
+
+def kb_desired_statusline(kb_dir: Path) -> dict:
+    """The statusLine entry the installer wires on machines that have none."""
+    h = kb_dir.as_posix().rstrip("/")
+    return {"type": "command", "command": f'bash "{h}/engine/kb-statusline.sh"'}
+
+
 # --- Merge core --------------------------------------------------------------
 
 
@@ -177,6 +192,12 @@ def merge_settings(settings_path: Path, kb_dir: Path, dry_run: bool = False) -> 
     statusMessage customizations. That one field is the only thing ever updated;
     foreign entries stay untouched.
 
+    The statusLine key follows the same ownership rules: absent -> set ours;
+    contains STATUSLINE_KEY -> ours, command repointed when stale (other fields,
+    e.g. padding, preserved); anything else -> foreign, never touched — the
+    installer summary tells the user how to compose the KB segment into their
+    own statusline instead.
+
     Report shape:
         {
           "changed": bool,
@@ -184,6 +205,7 @@ def merge_settings(settings_path: Path, kb_dir: Path, dry_run: bool = False) -> 
           "updated": ["UserPromptSubmit:kb-context.sh", ...],  # command repointed
           "skipped": ["UserPromptSubmit:kb-mark-intercept.sh", ...],  # already current
           "created_groups": ["PostToolUse[matcher=Read]", ...],
+          "statusline": "set" | "updated" | "current" | "foreign",
           "backup": "<path or None>",
           "wrote": bool,
         }
@@ -204,6 +226,7 @@ def merge_settings(settings_path: Path, kb_dir: Path, dry_run: bool = False) -> 
         "updated": [],
         "skipped": [],
         "created_groups": [],
+        "statusline": None,
         "backup": None,
         "wrote": False,
     }
@@ -239,6 +262,22 @@ def merge_settings(settings_path: Path, kb_dir: Path, dry_run: bool = False) -> 
                 report["changed"] = True
             else:
                 report["skipped"].append(label)
+
+    desired_sl = kb_desired_statusline(kb_dir)
+    sl = settings.get("statusLine")
+    if sl is None:
+        settings["statusLine"] = desired_sl
+        report["statusline"] = "set"
+        report["changed"] = True
+    elif isinstance(sl, dict) and STATUSLINE_KEY in str(sl.get("command", "")):
+        if sl.get("command") != desired_sl["command"]:
+            sl["command"] = desired_sl["command"]
+            report["statusline"] = "updated"
+            report["changed"] = True
+        else:
+            report["statusline"] = "current"
+    else:
+        report["statusline"] = "foreign"
 
     if not report["changed"]:
         return report  # idempotent no-op: nothing written, no backup spam
