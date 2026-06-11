@@ -42,11 +42,22 @@ fi
 # MCP server command (both recorded from sys.executable) point at it for free.
 KB_HOME="${KB_HOME:-$HOME/.kb}"
 VENV="$KB_HOME/venv"
+
+venv_py() {
+    # Both layouts: POSIX venvs put the interpreter in bin/, Windows venvs in
+    # Scripts/ — and this script DOES run on Windows via Git Bash (bootstrap.sh),
+    # where `python -m venv` succeeds but only Scripts/python.exe exists.
+    for cand in "$VENV/bin/python" "$VENV/Scripts/python.exe"; do
+        if [ -x "$cand" ]; then printf '%s\n' "$cand"; return 0; fi
+    done
+    return 1
+}
+
 PY="$BASE_PY"
-if [ -x "$VENV/bin/python" ]; then
-    PY="$VENV/bin/python"
-elif "$BASE_PY" -m venv "$VENV" >/dev/null 2>&1; then
-    PY="$VENV/bin/python"
+if found="$(venv_py)"; then
+    PY="$found"
+elif "$BASE_PY" -m venv "$VENV" >/dev/null 2>&1 && found="$(venv_py)"; then
+    PY="$found"
 else
     echo "  note: could not create a virtualenv (Debian/Ubuntu: sudo apt install python3-venv)."
     echo "        Falling back to system Python; optional deps may not install (degrade to BM25)."
