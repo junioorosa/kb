@@ -130,6 +130,13 @@ Flags (daily time, skip the manager auto-launch), status, and rollback are in
 
 Capture and finalize run as a **nightly job** registered at install — retime it in the manager.
 
+The job's git calls are non-interactive: an expired credential never opens one
+login window per repo. When a fetch fails on credentials, the sync makes **one**
+interactive attempt per git host (a single browser/dialog — often self-healing
+when your SSO session is alive) and re-fetches the rest from the refreshed
+token; still failing, it proceeds on stale refs and flags it in the run report.
+`"sync_interactive_auth": "never"` in the config disables even that one prompt.
+
 ## Use it from any agent (MCP)
 
 Hosts without prompt hooks talk to the same local engine through MCP — the model **pulls**

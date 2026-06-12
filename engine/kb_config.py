@@ -140,7 +140,7 @@ def resolve_vault(strict: bool = False):
 MANAGED_KEYS = {
     "vault", "workspaces",
     "default_branches", "integration_branches", "production_branches",
-    "since_hours", "max_turns", "sync_times",
+    "since_hours", "max_turns", "sync_times", "sync_interactive_auth",
 }
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -205,6 +205,11 @@ def validate_config_update(updates: dict) -> list[str]:
         if not (isinstance(val, list) and val
                 and all(isinstance(t, str) and _HHMM_RE.match(t.strip()) for t in val)):
             errors.append("sync_times must be a non-empty list of 24h 'HH:MM' strings")
+
+    if "sync_interactive_auth" in updates:
+        val = updates["sync_interactive_auth"]
+        if not (isinstance(val, str) and val.strip().lower() in ("once", "never")):
+            errors.append("sync_interactive_auth must be 'once' or 'never'")
 
     unknown = set(updates) - MANAGED_KEYS
     if unknown:
