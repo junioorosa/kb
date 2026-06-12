@@ -54,6 +54,10 @@ def test_validate():
         check("sync_times empty fails", validate_config_update({"sync_times": []}) != [])
         check("sync_times bad format fails", validate_config_update({"sync_times": ["25:00"]}) != [])
         check("sync_times non-list fails", validate_config_update({"sync_times": "01:00"}) != [])
+        check("sync_interactive_auth once passes", validate_config_update({"sync_interactive_auth": "once"}) == [])
+        check("sync_interactive_auth never (any case) passes", validate_config_update({"sync_interactive_auth": "Never"}) == [])
+        check("sync_interactive_auth unknown value fails", validate_config_update({"sync_interactive_auth": "always"}) != [])
+        check("sync_interactive_auth non-string fails", validate_config_update({"sync_interactive_auth": True}) != [])
 
 
 def _with_home(d):

@@ -8,5 +8,6 @@
   "production_branches": ["master", "main"],
   "transcript_stores": ["~/.codex/sessions"],
   "since_hours": 24,
-  "max_turns": 30
+  "max_turns": 30,
+  "sync_interactive_auth": "once"
 }

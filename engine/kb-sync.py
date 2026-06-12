@@ -422,13 +422,24 @@ def load_config():
     return cfg
 
 
-def run_git(args, cwd, check=False, timeout=30):
-    # GIT_TERMINAL_PROMPT=0: a headless sync must never block on a credential
-    # prompt — fail fast instead of hanging to the timeout.
+def run_git(args, cwd, check=False, timeout=30, interactive=False):
+    # A headless sync must never block on credentials: GIT_TERMINAL_PROMPT=0
+    # kills terminal prompts, and credential.interactive=false + GCM_INTERACTIVE
+    # silence credential-helper UIs — Git Credential Manager ignores
+    # GIT_TERMINAL_PROMPT and would otherwise pop a browser OAuth tab PER FETCH
+    # at 1 AM. interactive=True lifts only the helper suppression, for the one
+    # budgeted re-auth attempt per host (see retry_auth_fetches).
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    cred = []
+    if interactive:
+        env.pop("GCM_INTERACTIVE", None)
+    else:
+        env["GCM_INTERACTIVE"] = "never"
+        cred = ["-c", "credential.interactive=false"]
     r = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True,
+        ["git", *cred, *args], cwd=cwd, capture_output=True,
         text=True, encoding="utf-8", errors="replace", timeout=timeout,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env=env,
     )
     if check and r.returncode != 0:
         raise RuntimeError(f"git {args} failed in {cwd}: {r.stderr}")
@@ -608,6 +619,73 @@ def fetch_repo(repo: Path, branch_names):
             err = (r.stderr or "").strip().splitlines()
             last_err = err[-1] if err else f"rc={r.returncode}"
     return any_ok, last_err
+
+
+# --- Budgeted interactive re-auth --------------------------------------------
+# The first fetch pass is fully non-interactive: an expired credential-helper
+# token fails fast instead of opening one browser OAuth tab per repo (GCM did
+# exactly that overnight). But a single interactive attempt is often all it
+# takes — a live SSO cookie completes the OAuth round-trip without the user —
+# so killing the whole sync without trying once would throw away a real
+# self-heal. Budget: ONE credential prompt per remote host per run.
+
+_AUTH_ERR_RE = re.compile(
+    r"authentication failed|could not read username|could not read password|"
+    r"interactivity has been disabled|terminal prompts disabled|"
+    r"invalid credentials|http basic: access denied|access denied|"
+    r"\b401\b|\b403\b", re.I)
+
+
+def is_auth_failure(reason: str) -> bool:
+    return bool(_AUTH_ERR_RE.search(reason or ""))
+
+
+def origin_host(url: str) -> str:
+    """Host of a remote URL: scheme://[user@]host[:port]/..., or scp-like
+    git@host:path. Empty string when it can't be parsed (never guessed)."""
+    u = (url or "").strip()
+    if not u:
+        return ""
+    m = re.match(r"^[a-z+]+://(?:[^/@]+@)?([^/:]+)", u, re.I)
+    if m:
+        return m.group(1).lower()
+    m = re.match(r"^(?:[^@/]+@)([^:/]+):", u)
+    if m:
+        return m.group(1).lower()
+    return ""
+
+
+def retry_auth_fetches(fetch_failed, fetch_names, attempted_hosts):
+    """One interactive credential attempt per distinct remote host per RUN.
+
+    For the first auth-shaped failure of each host, a single `ls-remote` runs
+    with the credential helper allowed — one git process, so at most one
+    browser tab/dialog. On success the helper caches the token and every failed
+    repo of that host is re-fetched non-interactively for free. Hosts already
+    attempted this run are never re-prompted (attempted_hosts is shared across
+    workspaces); non-auth failures pass through to the stale-refs degrade.
+
+    Returns (recovered_repos, still_failed)."""
+    recovered, still = [], []
+    for repo, reason in fetch_failed:
+        if not is_auth_failure(reason):
+            still.append((repo, reason))
+            continue
+        host = origin_host(repo_origin(repo) or "")
+        if host and host not in attempted_hosts:
+            attempted_hosts.add(host)
+            print(f"    [auth] {host}: credentials needed — one interactive attempt "
+                  f"(a browser/dialog may open; sync_interactive_auth='never' disables this)")
+            try:
+                run_git(["ls-remote", "origin", "HEAD"], repo, timeout=240, interactive=True)
+            except Exception:
+                pass  # outcome is judged by the re-fetch below
+        ok, r2 = fetch_repo(repo, fetch_names)
+        if ok:
+            recovered.append(repo)
+        else:
+            still.append((repo, r2 or reason))
+    return recovered, still
 
 
 def branch_unchanged_since_hwm(state: dict, origin_norm: str, branch: str, repo: Path) -> bool:
@@ -1782,6 +1860,14 @@ def main():
                        or args.ignore_hwm or args.skip_capture or args.skip_finalize)
     report = RunReport()
 
+    # Interactive re-auth budget (see retry_auth_fetches): 'once' (default) allows
+    # one credential prompt per remote host per run; 'never' for strictly headless
+    # boxes. The attempted set spans workspaces so a host is only ever asked once.
+    sync_auth_mode = str(cfg.get("sync_interactive_auth", "once")).strip().lower()
+    if sync_auth_mode not in ("once", "never"):
+        sync_auth_mode = "once"
+    auth_hosts_attempted: set = set()
+
     # Team read-side: if the vault is connected to a remote, refresh from it before
     # capturing. Fast-forwards when the local vault is strictly behind; a diverged
     # local (your own un-pushed captures) only gets the fetch and is reconciled via
@@ -1817,6 +1903,14 @@ def main():
                 # has a remote but no integration ref fetched -> origin/* may be stale.
                 fetch_failed.append((r, reason))
                 incomplete_origins.add(o)  # stale refs -> examination not trustworthy
+        if fetch_failed and sync_auth_mode != "never":
+            recovered, fetch_failed = retry_auth_fetches(fetch_failed, fetch_names,
+                                                         auth_hosts_attempted)
+            for r in recovered:
+                o = normalize_origin(repo_origin(r)) or str(r)
+                ok_count += 1
+                fetched_ok_origins.add(o)
+                incomplete_origins.discard(o)
         print(f"  fetched {ok_count} repos (integration refs, read-only)")
         report.note_scan(len(repos), ok_count)
         for r, reason in fetch_failed:
