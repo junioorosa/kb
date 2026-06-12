@@ -1423,11 +1423,19 @@ pr:
 ---
 ```
 {step3_text}
-4. Audit current learnings against the diff. For each one classify:
+4. Audit current learnings against the diff. This branch is OPEN — its code has NOT
+   landed and may never become truth, so corrections are gated by ownership:
    - CONFIRMS — diff matches the learning, keep.
-   - REFUTES — diff contradicts; correct the file, add `## Correction history` line.
-   - ADJUSTS — partially right; edit to incorporate nuance. You MAY trim an over-long
-     existing learning toward its delta (drop tutorial scaffolding), but never delete a file.
+   - ADJUSTS / REFUTES on THIS ticket's own learnings (`{folder}/Learnings/`) —
+     edit them; they live and die with this ticket. REFUTES corrects the file and adds
+     a `## Correction history` line. You MAY trim an over-long existing learning toward
+     its delta (drop tutorial scaffolding), but never delete a file.
+   - ADJUSTS / REFUTES on ANY OTHER file (another ticket's, project or workspace
+     scope) — do NOT edit it. Record the suspicion instead: one bullet under a
+     `## Pending challenges` section in THIS ticket's `_index.md`, shaped
+     `- [[<challenged file>]] — <what the diff suggests is wrong or nuanced>`.
+     The finalize pass re-audits it once the code lands in production — unlanded
+     code never rewrites established knowledge.
    - ADDS — diff/commits reveal a pattern that PASSES the worth-saving test below;
      create a new learning file. Classify scope:
      - ticket: `{vault}/{folder}/Learnings/<name>.md`
@@ -1503,7 +1511,8 @@ def finalize_prompt(cfg, workspace, repo, ticket, res, landed_diff, hints, pre_e
         diff_block = ""
     return f"""You are running headless in KB finalize mode. Do not ask — execute.
 
-Vault: `{vault}` (use obsidian-vault MCP).
+Vault root (absolute): `{vault}`
+**Use the standard Read/Write/Edit/Glob tools — do NOT use any MCP server.** KB paths below are relative to the vault root; always prefix them with it.
 KB folder: `{ticket['path']}`
 Project: {repo.name}
 Branch (match key): {ticket.get('branch','')}
@@ -1519,6 +1528,11 @@ Task:
    - REFUTES — correct the file, add `## Correction history` line.
    - ADJUSTS — edit to incorporate nuance.
    - ADDS — new pattern not yet recorded; create new learning file (default scope: ticket).
+   This branch HAS landed in production — the landed diff is real evidence, so
+   cross-ticket / project / workspace corrections are authorized HERE (capture defers
+   them to this pass). If `_index.md` has a `## Pending challenges` section, re-audit
+   every challenged file against the landed diff: apply the correction (with a
+   `## Correction history` line) or drop the challenge — then remove the section.
    Workspace/project-scope corrections need concrete evidence; in doubt, leave them alone and add a ticket-scope note.
 5. Update `_index.md`:
    - status: resolved
