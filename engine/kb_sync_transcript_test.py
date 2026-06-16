@@ -151,6 +151,31 @@ def main() -> int:
         check("both adapter families coexist on one branch",
               len(sessions) == 2 and str(claude_jsonl) in kinds and str(target) in kinds)
 
+        print("test_claude_subdir_mark_resolved_by_id")
+        # The regression: a mark made from a SUBDIRECTORY. The transcript lives
+        # under the project-ROOT encoded dir (named by session_id), but the
+        # sidecar cwd is a deep subpath whose encoding points at a dir that never
+        # existed. Locating by session_id must still find it.
+        root_cwd = "C:/work/proj" if os.name == "nt" else "/work/proj"
+        deep_cwd = root_cwd + "/src/main/java/com/x"
+        root_enc = kb.encode_cwd(root_cwd)
+        (kb.PROJECTS_DIR / root_enc).mkdir(parents=True, exist_ok=True)
+        sub_jsonl = kb.PROJECTS_DIR / root_enc / "subdirsid.jsonl"
+        sub_jsonl.write_text('{"role":"user"}\n', encoding="utf-8")
+        check("cwd-encoded deep path would miss",
+              not (kb.PROJECTS_DIR / kb.encode_cwd(deep_cwd) / "subdirsid.jsonl").exists())
+        (kb.STATE_DIR / "kb-session-branch-subdirsid.json").write_text(json.dumps({
+            "session_id": "subdirsid", "branch": "feat/sub", "cwd": deep_cwd,
+        }), encoding="utf-8")
+        sessions = kb.find_sessions_for_branch("feat/sub")
+        check("subdir-marked session resolves by id, not cwd",
+              len(sessions) == 1 and sessions[0]["jsonl_path"] == sub_jsonl)
+
+        print("test_marked_branches")
+        brs = kb.marked_branches()
+        check("marked_branches lists every sidecar branch",
+              "feat/sub" in brs and "feat/x" in brs)
+
         # ---- degradation cases -------------------------------------------
         print("test_token_not_found")
         sc2 = sidecar_for(kb.STATE_DIR, "feat/ghost", "KB-MARK:feat/ghost:dead0000")

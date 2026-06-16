@@ -184,8 +184,31 @@ def test_home_and_config_resolution():
                 os.environ["KB_HOME"] = prev_kbh
 
 
+def test_find_session_transcript():
+    """The deterministic-key locator: find a transcript by session_id regardless
+    of which directory holds it — the fix for marks made from a subdirectory,
+    where a cwd-reconstructed path points at a directory that never existed."""
+    print("test_find_session_transcript")
+    with tempfile.TemporaryDirectory() as d:
+        projects = Path(d) / "projects"
+        root_dir = projects / "C--work-repo"   # transcript under the project ROOT dir
+        root_dir.mkdir(parents=True)
+        sid = "abc123-uuid"
+        (root_dir / f"{sid}.jsonl").write_text("{}\n", encoding="utf-8")
+        found = kb_config.find_session_transcript(sid, projects)
+        check("locates by session_id across dirs", found is not None and found.name == f"{sid}.jsonl")
+        check("unknown id -> None", kb_config.find_session_transcript("nope", projects) is None)
+        check("empty id -> None", kb_config.find_session_transcript("", projects) is None)
+        check("missing projects dir -> None", kb_config.find_session_transcript(sid, Path(d) / "nope") is None)
+        deep = projects / "x" / "y"; deep.mkdir(parents=True)
+        (deep / "deep-sid.jsonl").write_text("{}\n", encoding="utf-8")
+        check("nested transcript found via rglob fallback",
+              kb_config.find_session_transcript("deep-sid", projects) is not None)
+
+
 def main():
     test_validate()
+    test_find_session_transcript()
     test_write_merges_and_preserves()
     test_write_creates_when_absent()
     test_write_refuses_invalid()

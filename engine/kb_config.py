@@ -128,6 +128,37 @@ def resolve_vault(strict: bool = False):
     return None
 
 
+def find_session_transcript(session_id: str, projects_dir):
+    """Locate a host session transcript by its session_id — the deterministic key.
+
+    The session_id is globally unique and IS the transcript's filename
+    (`<session_id>.jsonl`). Locating by it is robust where reconstructing a path
+    from the session's cwd is NOT: a host keys the transcript directory by the
+    project/launch root, so a session marked from a SUBDIRECTORY (the common
+    case — you're usually deep in `src/...`) encodes to a directory that never
+    existed, and the transcript is silently missed.
+
+    Host/OS-agnostic: assumes only that the file is named for the session;
+    makes no assumption about the directory layout (cwd-encoded, flat, or
+    date-nested). Returns a Path or None. Pure lookup — never raises.
+    """
+    if not session_id:
+        return None
+    try:
+        root = Path(projects_dir)
+        if not root.exists():
+            return None
+        # One level down is the norm (projects/<dir>/<session_id>.jsonl); the
+        # rglob is a catch-all for any other depth a host might use.
+        for hit in sorted(root.glob(f"*/{session_id}.jsonl")):
+            return hit
+        for hit in sorted(root.rglob(f"{session_id}.jsonl")):
+            return hit
+    except OSError:
+        return None
+    return None
+
+
 # --- Config writing (manager/setup surface) ----------------------------------
 # The config file is what resolves the vault; a bad write poisons retrieval
 # silently. So the validated, atomic writer lives in the engine (which owns
