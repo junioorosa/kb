@@ -26,6 +26,15 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
+# Canonical, host-agnostic transcript locator lives in kb_config (single source
+# of truth). Guarded so the embedding engine still degrades gracefully if the
+# sibling module is somehow unavailable.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import kb_config as _kb_config
+except Exception:
+    _kb_config = None
+
 KB_HOME = Path(os.environ.get("KB_HOME") or (Path.home() / ".kb"))
 CACHE_DIR = KB_HOME / "cache" / "kb-embed"
 VECTORS_PATH = CACHE_DIR / "vectors.npy"
@@ -345,11 +354,18 @@ def reindex_transcripts(open_branches: set[str], state_dir: Path,
                 continue
             sid = d.get("session_id", "")
             cwd = d.get("cwd", "")
-            if not sid or not cwd:
+            if not sid:
                 continue
-            cwd_enc = re.sub(r"[:/\\_]", "-", cwd)
-            jsonl = projects_dir / cwd_enc / f"{sid}.jsonl"
-            if not jsonl.exists():
+            # Locate by session_id (deterministic key), not by reconstructing the
+            # path from cwd — a mark from a subdirectory encodes to a directory
+            # that never existed. cwd-encoding stays only as a fallback.
+            jsonl = None
+            if _kb_config is not None:
+                jsonl = _kb_config.find_session_transcript(sid, projects_dir)
+            if (jsonl is None or not jsonl.exists()) and cwd:
+                cand = projects_dir / re.sub(r"[:/\\_]", "-", cwd) / f"{sid}.jsonl"
+                jsonl = cand if cand.exists() else None
+            if not jsonl or not jsonl.exists():
                 continue
             sessions.append((sid, cwd, br, jsonl))
 

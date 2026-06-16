@@ -260,14 +260,43 @@ def find_sessions_for_branch(branch: str) -> list[dict]:
                     "jsonl_path": jsonl,
                 })
             continue
-        if not sid or not cwd:
+        if not sid:
             continue
-        jsonl = PROJECTS_DIR / encode_cwd(cwd) / f"{sid}.jsonl"
+        # Locate by the deterministic key (session_id), not by reconstructing a
+        # path from cwd: a mark made from a SUBDIRECTORY encodes to a directory
+        # that never existed, silently losing the transcript. kb_config owns the
+        # canonical, host-agnostic lookup; the cwd path stays only as a fallback.
+        jsonl = None
+        if kb_config is not None:
+            jsonl = kb_config.find_session_transcript(sid, PROJECTS_DIR)
+        if (jsonl is None or not jsonl.exists()) and cwd:
+            cand = PROJECTS_DIR / encode_cwd(cwd) / f"{sid}.jsonl"
+            jsonl = cand if cand.exists() else None
         out.append({
             "session_id": sid,
             "cwd": cwd,
-            "jsonl_path": jsonl if jsonl.exists() else None,
+            "jsonl_path": jsonl if (jsonl and jsonl.exists()) else None,
         })
+    return out
+
+
+def marked_branches() -> set:
+    """Every branch that has a session-branch sidecar — i.e. was /kb-mark'd.
+
+    Used so a marked branch's transcript is still indexed for capture even when
+    it already merged: a branch marked and merged between two nightly syncs is
+    never 'open' at sync time, so without this its conversation is lost to
+    git-only capture. The mark is the user's explicit signal it matters."""
+    out: set = set()
+    if not STATE_DIR.exists():
+        return out
+    for sc in STATE_DIR.glob("kb-session-branch-*.json"):
+        try:
+            br = json.loads(sc.read_text(encoding="utf-8")).get("branch", "")
+        except Exception:
+            continue
+        if br:
+            out.add(br)
     return out
 
 
@@ -1949,6 +1978,10 @@ def main():
                     for t in list_open_tickets(vault, ws["name"], rr.name):
                         if t.get("branch"):
                             relevant_branches.add(t["branch"])
+                # Index transcripts of any /kb-mark'd branch too, even one that
+                # already merged (and is no longer 'open') before this first sync
+                # — otherwise its session is lost to git-only capture.
+                relevant_branches |= marked_branches()
                 kb_embed.reindex_transcripts(relevant_branches, STATE_DIR, PROJECTS_DIR,
                                               embed_store, verbose=True)
                 embed_store.save()
