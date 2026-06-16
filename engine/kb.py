@@ -90,6 +90,16 @@ def cmd_manage(args) -> int:
     return subprocess.call([sys.executable, str(server), *extra])
 
 
+def cmd_consolidate(args) -> int:
+    """Run the non-destructive vault consolidation pass (sibling engine script).
+    Forwards its flags (--workspace, --dry-run, --cap, --max-turns) through."""
+    script = Path(__file__).resolve().parent / "kb-consolidate.py"
+    if not script.exists():
+        print("kb consolidate: kb-consolidate.py not found beside the CLI.", file=sys.stderr)
+        return 1
+    return subprocess.call([sys.executable, str(script), *getattr(args, "extra", [])])
+
+
 def _detect_branch() -> str:
     """Current git branch of the working dir, or "" (non-repo / detached / no git)."""
     try:
@@ -179,6 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_mark.add_argument("--done", action="store_true", help="close the ticket on the next sync (status: resolved)")
     p_mark.add_argument("--experimental", action="store_true", help="down-weight the ticket in retrieval")
     p_mark.set_defaults(func=cmd_mark)
+    sub.add_parser("consolidate", help="non-destructive vault cleanup pass (merge dups, resolve contradictions) on a review branch"
+                   ).set_defaults(func=cmd_consolidate)
     sub.add_parser("sync", help="(stub) capture + finalize from git").set_defaults(func=_stub("sync"))
     sub.add_parser("stats", help="(stub) token/tier stats").set_defaults(func=_stub("stats"))
     return p
@@ -187,9 +199,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args, unknown = parser.parse_known_args(argv)
-    # Only `manage` forwards unknown args through to the manager; every other
-    # subcommand stays strict and rejects them.
-    if getattr(args, "cmd", None) == "manage":
+    # `manage` and `consolidate` forward unknown args through to their sibling
+    # script; every other subcommand stays strict and rejects them.
+    if getattr(args, "cmd", None) in ("manage", "consolidate"):
         args.extra = unknown
     elif unknown:
         parser.error("unrecognized arguments: " + " ".join(unknown))
