@@ -32,7 +32,7 @@ from pathlib import Path
 
 # --- Manifest ----------------------------------------------------------------
 ENGINE_FILES = ["kb.py", "kb_config.py", "kb_retrieve.py", "kb_mcp.py",
-                "kb-sync.py", "kb-embed.py", "kb-embed-daemon.py"]
+                "kb-sync.py", "kb-embed.py", "kb-embed-daemon.py", "kb-consolidate.py"]
 
 
 def _is_test_file(name: str) -> bool:
