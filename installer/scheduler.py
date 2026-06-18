@@ -21,7 +21,9 @@ by the orchestrator's diff and by tests on a foreign OS.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,9 +33,53 @@ TASK_NAME = "ClaudeKbSync"          # Windows task / launchd label stem / cron m
 DEFAULT_TIME = "01:00"             # daily, local time
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
+# cron and launchd run with a minimal PATH that omits ~/.local/bin (the default
+# Claude Code install dir), so the bare `claude` kb-sync shells out to would not
+# resolve. We bake the dir holding `claude` (and the job's python) into the
+# job's PATH at register time. Mirrors KB_CLAUDE/KB_PYTHON resolution.
+_CLAUDE_BIN_DIRS = (
+    "~/.local/bin",
+    "~/.claude/local",
+    "~/.npm-global/bin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+)
+
 
 def _python_exe(explicit: str | None) -> str:
     return explicit or sys.executable or "python"
+
+
+def _claude_dir() -> str | None:
+    """Directory containing the `claude` CLI, or None. Note we take the dirname
+    of the entry found on PATH (typically a ~/.local/bin symlink) WITHOUT
+    resolving it — resolving would point at the internal versioned target, which
+    moves on every CLI update."""
+    explicit = os.environ.get("KB_CLAUDE")
+    if explicit:
+        return str(Path(explicit).expanduser().parent)
+    found = shutil.which("claude")
+    if found:
+        return str(Path(found).parent)
+    for d in _CLAUDE_BIN_DIRS:
+        p = Path(d).expanduser()
+        if (p / "claude").exists():
+            return str(p)
+    return None
+
+
+def _path_prefix(python_exe: str) -> str:
+    """Colon-joined dirs to prepend to the scheduled job's PATH so the tools
+    kb-sync shells out to (chiefly `claude`) resolve under the minimal
+    cron/launchd environment. '' when nothing extra is needed."""
+    dirs = []
+    cdir = _claude_dir()
+    if cdir:
+        dirs.append(cdir)
+    pdir = str(Path(python_exe).parent)
+    if os.sep in python_exe and pdir not in dirs:
+        dirs.append(pdir)
+    return ":".join(dirs)
 
 
 def _paths(kb_dir: Path):
@@ -156,18 +202,25 @@ def _unregister_windows(dry_run: bool) -> dict:
 
 # --- macOS (launchd) ---------------------------------------------------------
 
-def _macos_plist(kb_dir: Path, python_exe: str, times: list[str]) -> str:
+def _macos_plist(kb_dir: Path, python_exe: str, times: list[str],
+                 path_prefix: str = "") -> str:
     script, log = _paths(kb_dir)
     intervals = "\n".join(
         f"    <dict><key>Hour</key><integer>{int(t.split(':')[0])}</integer>"
         f"<key>Minute</key><integer>{int(t.split(':')[1])}</integer></dict>"
         for t in times)
+    # launchd starts the job with a bare PATH; prepend the claude/python dirs so
+    # the same `claude` resolution that works in the user's shell works here.
+    env = (f"  <key>EnvironmentVariables</key>\n"
+           f"  <dict><key>PATH</key>"
+           f"<string>{path_prefix}:/usr/local/bin:/usr/bin:/bin</string></dict>\n"
+           ) if path_prefix else ""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.kb.sync</string>
-  <key>ProgramArguments</key>
+{env}  <key>ProgramArguments</key>
   <array><string>{python_exe}</string><string>{script}</string></array>
   <key>StartCalendarInterval</key>
   <array>
@@ -181,8 +234,9 @@ def _macos_plist(kb_dir: Path, python_exe: str, times: list[str]) -> str:
 """
 
 
-def _register_macos(kb_dir: Path, python_exe: str, times: list[str], dry_run: bool) -> dict:
-    plist = _macos_plist(kb_dir, python_exe, times)
+def _register_macos(kb_dir: Path, python_exe: str, times: list[str], dry_run: bool,
+                    path_prefix: str = "") -> dict:
+    plist = _macos_plist(kb_dir, python_exe, times, path_prefix)
     target = Path.home() / "Library" / "LaunchAgents" / "com.kb.sync.plist"
     report = {"os": "macos", "plist_path": str(target), "times": times,
               "artifact": plist, "registered": False}
@@ -211,17 +265,23 @@ _CRON_BEGIN = "# >>> KB-SYNC (managed) >>>"
 _CRON_END = "# <<< KB-SYNC (managed) <<<"
 
 
-def _linux_cron_block(kb_dir: Path, python_exe: str, times: list[str]) -> str:
+def _linux_cron_block(kb_dir: Path, python_exe: str, times: list[str],
+                      path_prefix: str = "") -> str:
     script, log = _paths(kb_dir)
+    # Inline, per-command PATH (scoped to our line; never leaks to other cron
+    # jobs the way a free-standing PATH= env line in the crontab would). cron
+    # runs each line via /bin/sh, so $PATH expands to cron's default.
+    env = f'PATH="{path_prefix}:$PATH" ' if path_prefix else ""
     lines = []
     for t in times:
         hh, mm = t.split(":")
-        lines.append(f"{int(mm)} {int(hh)} * * * {python_exe} {script} >> {log} 2>&1")
+        lines.append(f"{int(mm)} {int(hh)} * * * {env}{python_exe} {script} >> {log} 2>&1")
     return "\n".join([_CRON_BEGIN, *lines, _CRON_END])
 
 
-def _register_linux(kb_dir: Path, python_exe: str, times: list[str], dry_run: bool) -> dict:
-    block = _linux_cron_block(kb_dir, python_exe, times)
+def _register_linux(kb_dir: Path, python_exe: str, times: list[str], dry_run: bool,
+                    path_prefix: str = "") -> dict:
+    block = _linux_cron_block(kb_dir, python_exe, times, path_prefix)
     report = {"os": "linux", "times": times, "artifact": block, "registered": False}
     if dry_run:
         return report
@@ -276,11 +336,13 @@ def register(kb_dir: Path, python_exe: str | None = None, time_hhmm=DEFAULT_TIME
     except ValueError as e:
         return {"os": sys.platform, "registered": False, "error": str(e)}
     if sys.platform == "win32":
+        # Windows tasks run under the user's interactive token, which inherits
+        # the user PATH, so no prefix is needed there.
         rep = _register_windows(Path(kb_dir), py, times, dry_run)
     elif sys.platform == "darwin":
-        rep = _register_macos(Path(kb_dir), py, times, dry_run)
+        rep = _register_macos(Path(kb_dir), py, times, dry_run, _path_prefix(py))
     else:
-        rep = _register_linux(Path(kb_dir), py, times, dry_run)
+        rep = _register_linux(Path(kb_dir), py, times, dry_run, _path_prefix(py))
     rep["time"] = times[0]  # legacy single-time field, kept for old readers
     return rep
 

@@ -63,6 +63,25 @@ def main() -> int:
     check("managed markers wrap the block",
           block.splitlines()[0] == scheduler._CRON_BEGIN and block.splitlines()[-1] == scheduler._CRON_END)
 
+    print("test_path_prefix_injection")
+    # Linux: prefix is prepended inline, scoped to the command, and the line
+    # still begins with "minute hour " so the time parsers keep working.
+    blk = scheduler._linux_cron_block(KB, "python3", ["01:00"], path_prefix="/home/u/.local/bin")
+    cron_line = [l for l in blk.splitlines() if not l.startswith("#")][0]
+    check("linux prefix prepended inline", 'PATH="/home/u/.local/bin:$PATH"' in cron_line)
+    check("linux line still starts minute hour", cron_line.startswith("0 1 "))
+    check("linux times still parse with prefix", scheduler.parse_times_from_cron(blk) == ["01:00"])
+    check("linux: no prefix -> no PATH=", "PATH=" not in scheduler._linux_cron_block(KB, "python3", ["01:00"]))
+    # macOS: prefix becomes an EnvironmentVariables/PATH entry; the interval
+    # dicts (Hour/Minute) are untouched so the plist parser still round-trips.
+    plp = scheduler._macos_plist(KB, "python3", ["01:00", "13:30"], path_prefix="/home/u/.local/bin")
+    check("macos EnvironmentVariables added", "<key>EnvironmentVariables</key>" in plp)
+    check("macos PATH carries the prefix", "/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin" in plp)
+    check("macos intervals untouched (2 Hours)", plp.count("<key>Hour</key>") == 2)
+    check("macos times still parse with prefix", scheduler.parse_times_from_plist(plp) == ["01:00", "13:30"])
+    check("macos: no prefix -> no EnvironmentVariables",
+          "<key>EnvironmentVariables</key>" not in scheduler._macos_plist(KB, "python3", ["01:00"]))
+
     print("test_register_dry_run")
     rep = scheduler.register(KB, time_hhmm=["13:30", "01:00"], dry_run=True)
     check("reports normalized times", rep.get("times") == ["01:00", "13:30"])

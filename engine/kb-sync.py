@@ -24,6 +24,7 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1184,11 +1185,47 @@ def set_index_status(vault: Path, folder_rel: str, status: str) -> bool:
         return False
 
 
+# The scheduled sync runs under cron (Linux) / launchd (macOS), whose minimal
+# PATH does NOT include ~/.local/bin or ~/.claude/local — the default install
+# dirs for the Claude Code CLI. A bare "claude" then dies with FileNotFoundError
+# on every capture (silent-ish: fetches still work, the run just logs errors=N).
+# Resolve an absolute path the same way the rest of the tool resolves python via
+# KB_PYTHON: explicit KB_CLAUDE override -> PATH -> known per-user locations.
+_CLAUDE_FALLBACKS = (
+    "~/.local/bin/claude",
+    "~/.claude/local/claude",
+    "~/.npm-global/bin/claude",
+    "/usr/local/bin/claude",
+    "/opt/homebrew/bin/claude",
+)
+
+
+def resolve_claude() -> str | None:
+    explicit = os.environ.get("KB_CLAUDE")
+    if explicit:
+        return str(Path(explicit).expanduser())
+    found = shutil.which("claude")
+    if found:
+        return found
+    for cand in _CLAUDE_FALLBACKS:
+        p = Path(cand).expanduser()
+        if p.exists():
+            return str(p)
+    return None
+
+
 def claude_run(prompt: str, max_turns: int, dry_run: bool):
     if dry_run:
         print(f"  [DRY] would invoke claude --print (--max-turns={max_turns}, prompt={len(prompt)} chars)")
         return 0, "", ""
-    cmd = ["claude", "--print", "--max-turns", str(max_turns), "--dangerously-skip-permissions"]
+    claude = resolve_claude()
+    if not claude:
+        return 1, "", (
+            "claude CLI not found. The scheduled sync runs with a minimal PATH "
+            "that excludes ~/.local/bin; set KB_CLAUDE to the claude binary or "
+            "ensure 'claude' is on PATH."
+        )
+    cmd = [claude, "--print", "--max-turns", str(max_turns), "--dangerously-skip-permissions"]
     try:
         r = subprocess.run(
             cmd, input=prompt, capture_output=True,
