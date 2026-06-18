@@ -202,8 +202,34 @@ def test_dry_run_subprocess():
         check("NO consolidation branch created by dry-run", "consolidation/" not in branches, branches)
 
 
+def test_project_filter_subprocess():
+    print("test_project_filter_subprocess")
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        vault = build_vault(root)
+        git(vault, "init", "-q"); git(vault, "add", "-A"); git(vault, "commit", "-qm", "seed")
+        home = root / "home" / ".kb"; home.mkdir(parents=True)
+        (home / "config.json").write_text(json.dumps({
+            "vault": str(vault),
+            "workspaces": [{"name": "Pauta", "path": str(root / "repos")}],
+        }), encoding="utf-8")
+        env = dict(os.environ)
+        env["KB_VAULT"] = str(vault); env["KB_HOME"] = str(home)
+        env["HOME"] = str(root / "home"); env["USERPROFILE"] = str(root / "home")
+        r = subprocess.run([sys.executable, str(HERE / "kb-consolidate.py"),
+                            "--workspace", "Pauta", "--project", "payments", "--dry-run"],
+                           capture_output=True, text=True, env=env, timeout=60)
+        check("dry-run exits 0", r.returncode == 0, r.stderr[:200])
+        check("only the targeted project planned", "payments:" in r.stdout and "ledger:" not in r.stdout)
+        bad = subprocess.run([sys.executable, str(HERE / "kb-consolidate.py"),
+                              "--workspace", "Pauta", "--project", "nope", "--dry-run"],
+                             capture_output=True, text=True, env=env, timeout=60)
+        check("unknown project errors loudly", bad.returncode == 2 and "no learnings" in bad.stderr)
+
+
 def main():
     test_gather()
+    test_project_filter_subprocess()
     test_symbols()
     test_freshness()
     test_map_prompt()
