@@ -162,20 +162,79 @@ def distinctive_symbols(text: str, limit: int = 6) -> list[str]:
     return found[:limit]
 
 
+_REPO_CACHE: dict = {}
+
+
+def _discover_repos(workspace_path: Path, max_depth: int = 4) -> list:
+    """Every git repo under the workspace (a dir containing .git), depth-limited,
+    NOT descending into a found repo. Mirrors kb-sync's discovery so a project's
+    vault folder name (== repo dir basename) maps back to the same repo, even when
+    the repo is nested (e.g. <ws>/<group>/<project>). Memoized per workspace."""
+    key = str(workspace_path)
+    if key in _REPO_CACHE:
+        return _REPO_CACHE[key]
+    repos: list = []
+
+    def walk(p: Path, depth: int):
+        if depth > max_depth:
+            return
+        try:
+            entries = sorted(p.iterdir())
+        except (PermissionError, OSError):
+            return
+        for sub in entries:
+            if not sub.is_dir():
+                continue
+            if sub.name in (".git", "node_modules", "target", ".venv", "__pycache__", ".obsidian"):
+                continue
+            if (sub / ".git").exists():
+                repos.append(sub)
+                continue
+            walk(sub, depth + 1)
+
+    walk(workspace_path, 1)
+    _REPO_CACHE[key] = repos
+    return repos
+
+
+def _repo_origin(repo: Path) -> str:
+    """Normalized origin URL of a repo, or "" (local-only / unreadable)."""
+    try:
+        r = run_git(["config", "--get", "remote.origin.url"], repo, timeout=10)
+    except Exception:
+        return ""
+    u = (r.stdout or "").strip().rstrip("/")
+    return u[:-4] if u.endswith(".git") else u
+
+
 def locate_repo(workspace_path: Path, project: str) -> Path | None:
-    """The project's repo dir under the workspace path, or None. Best-effort:
-    a direct child first, then a shallow search; a git repo is preferred."""
+    """The git repo whose dir basename == project, found anywhere under the
+    workspace. DETERMINISTIC, no guessing — the nested-repo lesson: a wrong repo
+    would feed false staleness hints and poison the consolidation.
+
+      * a direct child <ws>/<project>/.git wins (fast, unambiguous);
+      * otherwise EXACT-basename matches in the depth-limited walk;
+      * several matches that are CLONES OF THE SAME ORIGIN -> any one is fine
+        (same code, same grep answer) -> return it;
+      * matches spanning DIFFERENT origins (or local-only repos we can't tell
+        apart) -> ambiguous -> None (refuse to guess);
+      * no match -> None. Either way the probe just runs without hints.
+    """
     direct = workspace_path / project
     if (direct / ".git").exists():
         return direct
-    if direct.is_dir():
-        return direct
-    try:
-        for child in workspace_path.iterdir():
-            if child.is_dir() and child.name == project and (child / ".git").exists():
-                return child
-    except OSError:
-        pass
+    matches = [r for r in _discover_repos(workspace_path) if r.name == project]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    by_origin: dict = {}
+    for r in matches:
+        by_origin.setdefault(_repo_origin(r), r)
+    if len(by_origin) == 1 and "" not in by_origin:
+        return next(iter(by_origin.values()))   # clones of one origin == one codebase
+    print(f"  [freshness] '{project}': {len(matches)} dirs share that name across "
+          f"{len(by_origin)} origin(s) — ambiguous, skipping repo probe (no guess).")
     return None
 
 

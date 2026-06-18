@@ -97,6 +97,33 @@ def test_gather():
 
 # --- symbols + freshness -----------------------------------------------------
 
+def test_locate_repo():
+    print("test_locate_repo")
+    with tempfile.TemporaryDirectory() as d:
+        ws = Path(d) / "ws"; ws.mkdir()
+
+        def mkrepo(rel, origin=None):
+            p = ws / rel; p.mkdir(parents=True)
+            git(p, "init", "-q")
+            if origin:
+                git(p, "remote", "add", "origin", origin)
+            return p
+
+        a = mkrepo("alpha")                                     # direct child
+        b = mkrepo("group/beta")                                # nested, unique name
+        mkrepo("g1/shared", "https://ex.com/team/shared.git")   # two clones, SAME origin
+        mkrepo("g2/shared", "https://ex.com/team/shared.git")
+        mkrepo("h1/fork", "https://ex.com/team/fork.git")       # same name, DIFFERENT origin
+        mkrepo("h2/fork", "https://ex.com/other/fork.git")
+        kc._REPO_CACHE.clear()
+        check("direct child found", kc.locate_repo(ws, "alpha") == a)
+        check("nested unique found (the conob_estoque case)", kc.locate_repo(ws, "beta") == b)
+        check("unknown project -> None", kc.locate_repo(ws, "ghost") is None)
+        check("same-origin clones resolve (any clone, same code)",
+              kc.locate_repo(ws, "shared") is not None)
+        check("different-origin same-name -> None (no guess)", kc.locate_repo(ws, "fork") is None)
+
+
 def test_symbols():
     print("test_symbols")
     syms = kc.distinctive_symbols("uses `EmissaoNotaFiscalProdutoServiceImpl.realizaOperacoesAposEmissao` and ThreadPoolTaskScheduler")
@@ -229,6 +256,7 @@ def test_project_filter_subprocess():
 
 def main():
     test_gather()
+    test_locate_repo()
     test_project_filter_subprocess()
     test_symbols()
     test_freshness()
