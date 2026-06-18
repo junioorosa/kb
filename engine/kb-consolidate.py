@@ -334,6 +334,7 @@ def _vault_is_clean(vault: Path) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Non-destructive vault consolidation pass.")
     ap.add_argument("--workspace", help="workspace to consolidate (default: the only one, or fail if many)")
+    ap.add_argument("--project", help="consolidate only this project (by name); a targeted, smallest-blast run")
     ap.add_argument("--dry-run", action="store_true", help="print the plan + token estimate; no branch, no LLM, no writes")
     ap.add_argument("--cap", type=int, default=None, help=f"max projects this run (default config consolidate_cap or {DEFAULT_CAP})")
     ap.add_argument("--max-turns", type=int, default=None, help=f"claude --max-turns per pass (default {DEFAULT_MAX_TURNS})")
@@ -371,6 +372,11 @@ def main() -> int:
     if not projects:
         print(f"Nothing to consolidate under workspace '{ws_name}'.")
         return 0
+    if args.project:
+        projects = [p for p in projects if p["project"] == args.project]
+        if not projects:
+            print(f"ERROR: project '{args.project}' has no learnings under workspace '{ws_name}'.", file=sys.stderr)
+            return 2
 
     # --- plan + token estimate ----------------------------------------------
     print(f"KB consolidation — workspace '{ws_name}'  ({len(projects)} project(s) with learnings)")
