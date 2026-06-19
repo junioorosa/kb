@@ -30,9 +30,11 @@ retrieval"), so consolidation is built to be impossible to trust by accident:
 
 Repo-signal freshness: learnings cite concrete code symbols (a class, a method).
 Before the map pass, each learning's most distinctive symbols are grepped against
-the CURRENT project repo; "symbol no longer in code" is fed to the model as a
-staleness HINT (never an automatic delete — conservative). This is the cheap,
-deterministic "is this still true about the code" check; a full semantic
+the project's PRODUCTION branch (origin/master|main, preferring the remote-tracking
+ref), NOT the working tree — staleness is only meaningful against the landed code,
+not whatever feature branch is checked out. "symbol no longer in production" is fed
+to the model as a staleness HINT (never an automatic delete — conservative). This is
+the cheap, deterministic "is this still true about the code" check; a full semantic
 re-verification against live code is deliberately out of scope.
 
 CLI:
@@ -238,11 +240,35 @@ def locate_repo(workspace_path: Path, project: str) -> Path | None:
     return None
 
 
-def freshness_hints(vault: Path, repo: Path | None, learnings: list[str]) -> dict[str, list[str]]:
-    """{learning_rel: [symbols not found in the current repo]}. Empty when the repo
-    can't be located (graceful: no hints, never a false 'stale')."""
+def production_ref(repo: Path, production_branches: list[str]) -> str | None:
+    """The tree to grep for the freshness probe: the project's PRODUCTION branch,
+    preferring the remote-tracking ref (`origin/<b>` — the shared 'what's actually
+    in production' truth) over the local branch (which may be behind, or be whatever
+    arbitrary feature branch happens to be checked out). First that resolves wins;
+    None if none do. Staleness must be judged against production, never the working
+    tree — a symbol absent from a feature checkout (or present only on an unmerged
+    branch) says nothing about whether the landed code still has it."""
+    for b in (production_branches or []):
+        for ref in (f"origin/{b}", b):
+            r = run_git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=repo, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return ref
+    return None
+
+
+def freshness_hints(vault: Path, repo: Path | None, learnings: list[str],
+                    production_branches: list[str]) -> dict[str, list[str]]:
+    """{learning_rel: [symbols not found in the project's PRODUCTION branch]}. Empty
+    when the repo can't be located OR no production branch resolves (graceful: no
+    hints, never a false 'stale' off an arbitrary working tree)."""
     hints: dict[str, list[str]] = {}
     if repo is None or not (repo / ".git").exists():
+        return hints
+    ref = production_ref(repo, production_branches)
+    if ref is None:
+        # No production branch to validate against — do NOT grep the working tree;
+        # a feature checkout would yield misleading staleness. No signal beats a
+        # wrong one.
         return hints
     for rel in learnings:
         try:
@@ -251,8 +277,10 @@ def freshness_hints(vault: Path, repo: Path | None, learnings: list[str]) -> dic
             continue
         missing = []
         for sym in distinctive_symbols(text):
-            r = run_git(["grep", "-Fq", "--", sym], cwd=repo, timeout=20)
-            if r.returncode == 1:   # 0 = found, 1 = not found, other = error (ignore)
+            # grep the production TREE (ref), not the checkout. -e guards a symbol
+            # that could start with '-'. 0 = found, 1 = not found, >=2 = error (ignore).
+            r = run_git(["grep", "-F", "-q", "-e", sym, ref], cwd=repo, timeout=20)
+            if r.returncode == 1:
                 missing.append(sym)
         if missing:
             hints[rel] = missing
@@ -266,8 +294,9 @@ def map_prompt(vault: Path, workspace: str, project: str, learnings: list[str],
     hint_lines = []
     for rel, syms in hints.items():
         hint_lines.append(f"- `{rel}` — symbols not found in current code: {', '.join(syms)}")
-    hint_block = ("\nFreshness probe (symbols grepped against the CURRENT project repo; "
-                  "treat as a STALENESS HINT, never an automatic delete):\n"
+    hint_block = ("\nFreshness probe (symbols grepped against the project's PRODUCTION "
+                  "branch (origin/master|main), not the working tree; treat as a "
+                  "STALENESS HINT, never an automatic delete):\n"
                   + "\n".join(hint_lines) + "\n") if hint_lines else ""
     learn_block = "\n".join(f"- {rel}" for rel in learnings)
     idx_block = "\n".join(f"- {rel}" for rel in indexes) or "- (none)"
@@ -409,6 +438,7 @@ def main() -> int:
         return 2
     cfg = kb_config.load_config()
     workspaces = cfg.get("workspaces", []) or []
+    prod_branches = cfg.get("production_branches") or ["master", "main"]
     cap = args.cap if args.cap is not None else int(cfg.get("consolidate_cap", DEFAULT_CAP))
     max_turns = args.max_turns if args.max_turns is not None else int(cfg.get("max_turns", DEFAULT_MAX_TURNS))
 
@@ -447,7 +477,7 @@ def main() -> int:
         repo = locate_repo(ws_path, b["project"])
         # Freshness is computed for the plan too — the dry-run's stale-hint counts
         # are exactly the signal you want before deciding to spend a real run.
-        hints = freshness_hints(vault, repo, b["learnings"])
+        hints = freshness_hints(vault, repo, b["learnings"], prod_branches)
         prompt = map_prompt(vault, ws_name, b["project"], b["learnings"], b["indexes"], hints)
         # Approximate the real cost: the prompt lists files; the model also reads them.
         bodies = 0
