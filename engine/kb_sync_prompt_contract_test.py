@@ -91,6 +91,12 @@ def test_finalize_promotes_challenges():
     check("evidence bar for broad scopes kept",
           "Workspace/project-scope corrections need concrete evidence" in p)
     check("taxonomy intact", all(k in p for k in ("CONFIRMS", "REFUTES", "ADJUSTS", "ADDS")))
+    # anti-twin guard on ADDS: finalize created the 40643 twin because its ADD rule
+    # lacked the "one insight = one file / prefer ADJUST over a near-dup" clause capture has.
+    check("finalize ADDS has anti-twin guard",
+          "One insight = one file" in p and "near-dup" in _flat(p))
+    check("finalize anti-twin refers to step 1's own-ticket learnings",
+          "you read in step 1" in _flat(p))
 
 
 def test_no_mcp_in_either():
@@ -110,11 +116,30 @@ def test_pre_extracted_variants_keep_the_gate():
           "remove the section" in build_finalize(pre))
 
 
+def test_capture_pre_extract_reads_own_ticket_learnings():
+    """In pre-extract mode capture must still deterministically read THIS ticket's own
+    Learnings dir — the semantic block can miss a same-ticket sibling, and trusting only
+    the block is what lets a cross-pass twin slip in. The ticket folder is the match key,
+    not a similarity score."""
+    print("test_capture_pre_extract_reads_own_ticket_learnings")
+    pre = "Pre-extracted learnings:\n- [[x.md]] body"
+    p = build_capture(pre)
+    flat = _flat(p)
+    check("reads this ticket's own Learnings dir deterministically",
+          "feat/123-pix/Learnings/" in p and "EVERY file under" in flat)
+    check("does not trust the semantic block for same-ticket siblings",
+          "do NOT rely on the semantic block to have surfaced a same-ticket sibling" in flat)
+    check("audits against the union, not the block alone", "UNION" in p)
+    check("still avoids other tickets' learnings",
+          "Do NOT browse OTHER tickets'" in flat)
+
+
 def main():
     test_capture_gates_cross_scope()
     test_finalize_promotes_challenges()
     test_no_mcp_in_either()
     test_pre_extracted_variants_keep_the_gate()
+    test_capture_pre_extract_reads_own_ticket_learnings()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
 

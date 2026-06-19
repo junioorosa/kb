@@ -1285,7 +1285,18 @@ def retrieve_for_branch(store, branch: str, project: str, commits: list, stat: s
         return [], []
 
 
-def dedup_scan(report, vault: Path, threshold: float = 0.80, max_pairs: int = 25) -> list[dict]:
+def _learnings_dir(rel: str) -> str | None:
+    """The `Learnings/` directory a learning lives in: `.../<owner>/Learnings/<file>.md`
+    -> `.../<owner>/Learnings`. None if the path isn't under a `Learnings/` dir. Two
+    learnings sharing one `Learnings/` dir (same ticket, or same project/workspace dir)
+    are far likelier a real twin than two same-topic learnings in different dirs — used
+    to apply the tighter same-folder threshold."""
+    i = rel.rfind("/Learnings/")
+    return rel[:i] + "/Learnings" if i != -1 else None
+
+
+def dedup_scan(report, vault: Path, threshold: float = 0.80,
+               same_ticket_threshold: float = 0.72, max_pairs: int = 25) -> list[dict]:
     """Flag learnings WRITTEN THIS RUN that overlap another learning — a same-run
     sibling (the audit can't see files being created in its own pass) OR an existing
     vault learning the capture-time retrieval failed to surface.
@@ -1308,6 +1319,14 @@ def dedup_scan(report, vault: Path, threshold: float = 0.80, max_pairs: int = 25
     a twin from a distinct sibling (~0.01 apart), so for a REVIEW signal a false positive
     (a glance) is cheaper than a false negative (a dup that persists) — hence 0.80, catching
     the twin with margin and surfacing a few near-siblings for the human to dismiss.
+
+    Same-folder pairs (both files in one `Learnings/` dir — one ticket, or one project/
+    workspace dir) get a tighter `same_ticket_threshold` (0.72). Two learnings in ONE
+    folder are far likelier a real cross-pass twin than two same-topic learnings in
+    different folders, and a differently-worded twin can sit below 0.80 (a real one —
+    `contar-` vs `contagem-` on one fix — scored 0.787 and slipped the net). The cost of
+    the lower bar is a few legitimate same-folder facets flagged for a glance; report-only,
+    so that's cheap.
     Embedding-bound and fail-open: any embedding error returns [] (never blocks sync)."""
     if kb_embed is None:
         return []
@@ -1334,7 +1353,8 @@ def dedup_scan(report, vault: Path, threshold: float = 0.80, max_pairs: int = 25
                     continue
                 best[hp] = max(best.get(hp, 0.0), float(h.get("score", 0.0)))
             for hp, s in best.items():
-                if s < threshold:
+                same_dir = _learnings_dir(rel) is not None and _learnings_dir(rel) == _learnings_dir(hp)
+                if s < (same_ticket_threshold if same_dir else threshold):
                     continue
                 pair = tuple(sorted([rel, hp]))
                 if pair in seen:
@@ -1349,11 +1369,12 @@ def dedup_scan(report, vault: Path, threshold: float = 0.80, max_pairs: int = 25
                 # 0.80-0.82 is almost all cross-run, so this split lets the human triage.
                 out.append({
                     "a": pair[0], "b": pair[1], "score": round(s, 3),
-                    "a_new": a_new, "b_new": b_new,
+                    "a_new": a_new, "b_new": b_new, "same_dir": same_dir,
                     "kind": "twin" if (a_new and b_new) else "review",
                 })
-        # twins first, then by score — surface the intra-run case the user flagged.
-        out.sort(key=lambda d: (d["kind"] != "twin", -d["score"]))
+        # twins first, then same-folder pairs (the cross-pass case the user flagged),
+        # then by score — both forms of duplicate surface ahead of distant near-siblings.
+        out.sort(key=lambda d: (d["kind"] != "twin", not d["same_dir"], -d["score"]))
         return out[:max_pairs]
     except kb_embed.EmbeddingsUnavailable as e:
         print(f"  [dedup] skipped (embeddings unavailable): {e}")
@@ -1391,12 +1412,14 @@ def capture_prompt(cfg, workspace, repo, branch, tipo, slug, folder_rel, default
     pre_block = f"\n{pre_extracted}\n" if pre_extracted else ""
     if pre_extracted:
         step3_text = (
-            "3. **Audit mode (pre-fetched):** the relevant existing learnings (ticket + project + "
-            "workspace scope) are provided in the \"Pre-extracted learnings\" block above — "
-            "they passed the semantic filter against the diff. Audit the diff AGAINST them. Do "
-            "NOT browse other `Learnings/*.md` — assume that block is the complete relevant set. "
-            f"The only extra file you may Read is this ticket's own `{vault}/{folder}/_index.md` "
-            "(if it exists)."
+            "3. **Audit mode (pre-fetched):** project- and workspace-scope learnings are in the "
+            "\"Pre-extracted learnings\" block above (they passed the semantic filter against the "
+            "diff). FIRST, deterministically Read THIS ticket's own "
+            f"`{vault}/{folder}/_index.md` and EVERY file under `{vault}/{folder}/Learnings/` "
+            "(exact path — the bounded set; the match key is the ticket folder, NOT a similarity "
+            "score, so do NOT rely on the semantic block to have surfaced a same-ticket sibling). "
+            "Audit the diff against the UNION of the block and this ticket's own learnings. Do "
+            "NOT browse OTHER tickets' `Learnings/*.md` — the block is the complete cross-scope set."
         )
     else:
         step3_text = (
@@ -1499,7 +1522,9 @@ pr:
    restate the same delta, emit the single most general one and let `_index.md` cross-link
    it — never write near-duplicate siblings. The existing-learnings view above does NOT
    include files you are creating in this same run, so this dedupe is yours to enforce.
-   Prefer ADJUSTS on an existing file over a new near-duplicate.
+   Prefer ADJUSTS on an existing file over a new near-duplicate — and an ADD that restates
+   a learning already in `{folder}/Learnings/` (read in step 3) is a twin: ADJUST that
+   file instead.
 5. Update `{vault}/{folder}/_index.md` apparent_problem / tags / related_tickets based on commits + diff. **Always set `last_update: <YYYY-MM-DD today>`**. Keep `branch: {branch}` intact — it is the match key. Do NOT set status=resolved here — only the finalize routine does that. Use English frontmatter keys: project, type, module, slug, title, opened, resolved, last_update, apparent_problem, actual_solution, related_tickets, branch, pr. Status enum: open|in-progress|resolved|discarded. Scope enum: ticket|project|workspace.
 6. Report briefly: created/updated file paths, CONFIRMS/REFUTES/ADJUSTS/ADDS counts and names.
 
@@ -1556,7 +1581,11 @@ Task:
    - CONFIRMS — keep.
    - REFUTES — correct the file, add `## Correction history` line.
    - ADJUSTS — edit to incorporate nuance.
-   - ADDS — new pattern not yet recorded; create new learning file (default scope: ticket).
+   - ADDS — a pattern NOT already recorded; create a new learning file (default scope:
+     ticket). **One insight = one file.** Before adding, check THIS ticket's own learnings
+     you read in step 1: if the landed diff merely restates an existing learning (even
+     under a different name or wording), CONFIRM or ADJUST that file — never write a
+     near-duplicate sibling. Prefer ADJUSTS on the existing file over a new near-dup.
    This branch HAS landed in production — the landed diff is real evidence, so
    cross-ticket / project / workspace corrections are authorized HERE (capture defers
    them to this pass). If `_index.md` has a `## Pending challenges` section, re-audit
@@ -2249,11 +2278,13 @@ def main():
         report.duplicates = dedup_scan(report, vault)
         if report.duplicates:
             twins = sum(1 for d in report.duplicates if d.get("kind") == "twin")
+            same = sum(1 for d in report.duplicates if d.get("same_dir"))
             print(f"\n  [dedup] {len(report.duplicates)} possible duplicate learning pair(s) "
-                  f"({twins} same-run twin) — review:")
+                  f"({twins} same-run twin, {same} same-folder) — review:")
             for d in report.duplicates:
                 tag = "TWIN  " if d.get("kind") == "twin" else "review"
-                print(f"    {tag} {d['score']:.3f}  {d['a']}  <->  {d['b']}")
+                scope = " [same-folder]" if d.get("same_dir") else ""
+                print(f"    {tag} {d['score']:.3f}  {d['a']}  <->  {d['b']}{scope}")
 
     # Record this run for the manager's sync-history view (real runs only).
     if not args.dry_run:
