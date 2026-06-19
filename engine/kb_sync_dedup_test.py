@@ -4,9 +4,10 @@
 Fakes kb_embed (no fastembed/numpy needed), so it runs anywhere. Exercises:
   - chunk -> file aggregation (max score across a file's chunks)
   - self-exclusion and _index.md-neighbour exclusion
-  - threshold filtering (recall-biased 0.80 default)
+  - threshold filtering (recall-biased 0.80 default; tighter 0.72 for same-folder pairs)
   - pair de-duplication (A<->B counted once, not twice)
-  - a_new / b_new flags + twin (both new) vs review (one new) labelling + sort
+  - a_new / b_new flags + same_dir flag + twin (both new) vs review (one new) labelling
+  - sort: twins first, then same-folder, then by score
   - max_pairs cap + descending sort
   - fail-open on EmbeddingsUnavailable / arbitrary error
 
@@ -85,10 +86,13 @@ def check(name, cond, detail=""):
 
 def main():
     mod = load_kb_sync()
-    A = "ws/proj/Learnings/a.md"
-    B = "ws/proj/Learnings/b.md"
-    C = "ws/proj/Learnings/c.md"
-    IDX = "ws/proj/_index.md"
+    # A,B,C share ONE ticket's Learnings dir (same-folder => tighter 0.72 threshold).
+    A = "ws/proj/fix/t1/Learnings/a.md"
+    B = "ws/proj/fix/t1/Learnings/b.md"
+    C = "ws/proj/fix/t1/Learnings/c.md"
+    IDX = "ws/proj/fix/t1/_index.md"
+    # X lives in a DIFFERENT ticket (cross-folder => default 0.80 threshold).
+    X = "ws/proj/fix/t2/Learnings/x.md"
 
     # 1. chunk->file max aggregation: two chunks of B, keep the max (0.91)
     out = run(mod, [A], {A: [{"path": B, "score": 0.71}, {"path": B, "score": 0.91}]})
@@ -102,12 +106,23 @@ def main():
     out = run(mod, [A], {A: [{"path": IDX, "score": 0.95}]})
     check("_index neighbour excluded", out == [], str(out))
 
-    # 4a. below threshold dropped
+    # 4a. cross-folder below default threshold dropped
+    out = run(mod, [A], {A: [{"path": X, "score": 0.79}]})
+    check("cross-folder below 0.80 dropped", out == [], str(out))
+    # 4b. cross-folder at default threshold kept
+    out = run(mod, [A], {A: [{"path": X, "score": 0.80}]})
+    check("cross-folder at 0.80 kept", len(out) == 1 and not out[0]["same_dir"], str(out))
+
+    # 4c. same-folder uses the tighter 0.72 threshold: a 0.79 twin (the real
+    #     contar-/contagem- case scored 0.787) that 0.80 would miss is now caught.
     out = run(mod, [A], {A: [{"path": B, "score": 0.79}]})
-    check("below threshold dropped", out == [], str(out))
-    # 4b. at threshold kept
-    out = run(mod, [A], {A: [{"path": B, "score": 0.80}]})
-    check("at threshold kept", len(out) == 1, str(out))
+    check("same-folder 0.79 caught", len(out) == 1 and out[0]["same_dir"], str(out))
+    # 4d. same-folder just below the tighter threshold dropped
+    out = run(mod, [A], {A: [{"path": B, "score": 0.71}]})
+    check("same-folder below 0.72 dropped", out == [], str(out))
+    # 4e. same-folder at the tighter threshold kept
+    out = run(mod, [A], {A: [{"path": B, "score": 0.72}]})
+    check("same-folder at 0.72 kept", len(out) == 1 and out[0]["same_dir"], str(out))
 
     # 5. pair de-dup: A->B and B->A both touched => one pair
     out = run(mod, [A, B], {A: [{"path": B, "score": 0.88}],
@@ -160,6 +175,14 @@ def main():
     check("twin sorts before higher review",
           len(out) == 2 and out[0]["kind"] == "twin" and out[1]["kind"] == "review",
           str([(d["kind"], d["score"]) for d in out]))
+
+    # 14. among reviews, a same-folder pair sorts before a higher-scoring cross-folder
+    #     one — the cross-pass twin the user flagged surfaces ahead of distant siblings.
+    out = run(mod, [A], {A: [{"path": B, "score": 0.80},   # same-folder review
+                             {"path": X, "score": 0.95}]})  # cross-folder review, higher
+    check("same-folder review sorts before higher cross-folder",
+          len(out) == 2 and out[0]["same_dir"] and not out[1]["same_dir"],
+          str([(d["b"], d["same_dir"], d["score"]) for d in out]))
 
     print()
     if FAILS:
