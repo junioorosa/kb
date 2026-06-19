@@ -143,14 +143,67 @@ def test_freshness():
         git(repo, "init", "-q")
         write(repo / "Service.java", "class PaymentRetryService { void go(){} }\n")
         git(repo, "add", "-A"); git(repo, "commit", "-qm", "init")
+        git(repo, "branch", "-M", "main")   # production branch == main (deterministic)
         # learning cites one present symbol and one that no longer exists
         write(vault / "Pauta/payments/Learnings/x.md",
               learning("retry", body_extra="`PaymentRetryService` e `RemovedLegacyClass`"))
-        hints = kc.freshness_hints(vault, repo, ["Pauta/payments/Learnings/x.md"])
-        miss = hints.get("Pauta/payments/Learnings/x.md", [])
+        rel = ["Pauta/payments/Learnings/x.md"]
+        miss = kc.freshness_hints(vault, repo, rel, ["master", "main"]).get(rel[0], [])
         check("absent symbol flagged", "RemovedLegacyClass" in miss)
         check("present symbol NOT flagged", "PaymentRetryService" not in miss)
-        check("no repo -> no hints (graceful)", kc.freshness_hints(vault, None, ["Pauta/payments/Learnings/x.md"]) == {})
+        check("no repo -> no hints (graceful)", kc.freshness_hints(vault, None, rel, ["main"]) == {})
+        check("production_ref resolves local production", kc.production_ref(repo, ["master", "main"]) == "main")
+        # rename production away -> no resolvable production branch -> no hints (never
+        # grep an arbitrary working tree, which would invent staleness)
+        git(repo, "branch", "-M", "trunk")
+        check("no production branch -> None", kc.production_ref(repo, ["master", "main"]) is None)
+        check("no production branch -> no hints (graceful)",
+              kc.freshness_hints(vault, repo, rel, ["master", "main"]) == {})
+
+
+def test_freshness_greps_production_not_checkout():
+    """The decisive case: a symbol absent from the CHECKED-OUT feature branch but
+    present in production must NOT be flagged stale, and a symbol that lives only on
+    an unmerged feature branch (absent from production) MUST be flagged — proving the
+    probe greps the production ref, not the working tree."""
+    print("test_freshness_greps_production_not_checkout")
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        vault = root / "vault"
+        repo = root / "repos" / "payments"; repo.mkdir(parents=True)
+        git(repo, "init", "-q")
+        write(repo / "Service.java", "class PaymentRetryService {}\n")
+        git(repo, "add", "-A"); git(repo, "commit", "-qm", "init")
+        git(repo, "branch", "-M", "main")            # production has PaymentRetryService
+        git(repo, "checkout", "-q", "-b", "feature/wip")
+        write(repo / "Service.java", "class FeatureOnlyClass {}\n")  # checkout drops it, adds another
+        git(repo, "add", "-A"); git(repo, "commit", "-qm", "wip")
+        write(vault / "Pauta/payments/Learnings/x.md",
+              learning("x", body_extra="`PaymentRetryService` e `FeatureOnlyClass`"))
+        rel = ["Pauta/payments/Learnings/x.md"]
+        miss = kc.freshness_hints(vault, repo, rel, ["master", "main"]).get(rel[0], [])
+        check("production symbol NOT flagged though absent from checkout",
+              "PaymentRetryService" not in miss, f"miss={miss}")
+        check("feature-only symbol flagged (absent from production though in checkout)",
+              "FeatureOnlyClass" in miss, f"miss={miss}")
+
+
+def test_production_ref_prefers_origin():
+    """When both a local production branch and its remote-tracking ref exist,
+    production_ref prefers origin/<b> — the shared 'what's in production' truth."""
+    print("test_production_ref_prefers_origin")
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        upstream = root / "upstream"; upstream.mkdir()
+        git(upstream, "init", "-q")
+        write(upstream / "f.txt", "ProdSymbol\n")
+        git(upstream, "add", "-A"); git(upstream, "commit", "-qm", "init")
+        git(upstream, "branch", "-M", "main")
+        clone = root / "clone"
+        subprocess.run(["git", "clone", "-q", str(upstream), str(clone)], capture_output=True, text=True)
+        check("prefers remote-tracking production ref",
+              kc.production_ref(clone, ["master", "main"]) == "origin/main",
+              kc.production_ref(clone, ["master", "main"]))
 
 
 # --- prompt contracts --------------------------------------------------------
@@ -172,6 +225,8 @@ def test_map_prompt():
     check("consolidation-history trace required", "## Consolidation history" in p)
     check("scoped to this project only", "Touch ONLY files under" in p and "payments/" in p)
     check("freshness hint injected", "GoneClass" in p and "STALENESS HINT" in f)
+    check("freshness probe names the production branch, not the working tree",
+          "PRODUCTION" in p and "not the working tree" in f)
     check("no MCP", "do NOT use any MCP server" in p and "obsidian" not in p.lower())
 
 
@@ -260,6 +315,8 @@ def main():
     test_project_filter_subprocess()
     test_symbols()
     test_freshness()
+    test_freshness_greps_production_not_checkout()
+    test_production_ref_prefers_origin()
     test_map_prompt()
     test_reduce_prompt()
     test_headers()
