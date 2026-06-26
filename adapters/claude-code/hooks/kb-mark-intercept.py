@@ -172,6 +172,7 @@ def main() -> int:
     remove_mode = "--remove" in args or "-r" in args
     done_mode = "--done" in args or "-d" in args
     exp_mode = "--experimental" in args or "--exp" in args
+    disc_mode = "--discard" in args or "--discarded" in args
     branch_args = [a for a in args if not a.startswith("-")]
 
     if not session_id:
@@ -245,6 +246,38 @@ def main() -> int:
                  f"alone for now; the next sync marks the right one at capture.")
         else:
             emit(f"✓ KB · \"{branch}\" marked experimental — no note exists yet; "
+                 f"the next sync marks it at capture.")
+        return 0
+
+    if disc_mode:
+        data = load_sidecar(path)
+        branch = branch_args[0] if branch_args else (data.get("branch", "") or detect_branch(payload))
+        if not branch:
+            emit("KB · /kb-mark --discard needs a branch — this session isn't marked and the "
+                 "current folder isn't a git repo. Try: /kb-mark --discard <branch>")
+            return 0
+        cwd = payload.get("cwd") or data.get("cwd") or os.getcwd()
+        data["session_id"] = session_id
+        data["branch"] = branch
+        data["cwd"] = cwd
+        data["mark_discarded"] = True
+        data["marked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        try:
+            save_sidecar(path, data)
+        except Exception as e:
+            emit(f"KB · couldn't save the mark: {e}")
+            return 0
+        folders = find_kb_folders(branch)
+        if len(folders) == 1 and set_index_status(folders[0], "discarded"):
+            emit(f"✓ KB · \"{branch}\" marked discarded — excluded from retrieval (weight 0) so a "
+                 f"dead end stops surfacing (in {folders[0]}/_index.md). "
+                 f"Stays excluded until you reopen it (edit status, or re-mark the branch).")
+        elif len(folders) > 1:
+            emit(f"✓ KB · \"{branch}\" marked discarded.\n"
+                 f"⚠ Several notes match this branch ({', '.join(folders)}) — leaving their status "
+                 f"alone for now; the next sync marks the right one at capture.")
+        else:
+            emit(f"✓ KB · \"{branch}\" marked discarded — no note exists yet; "
                  f"the next sync marks it at capture.")
         return 0
 

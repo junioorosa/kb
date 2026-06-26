@@ -336,6 +336,10 @@ Task — consolidate ONLY this project's learnings:
 Hard rules:
 - DETERMINISTIC: reference every source by its exact vault path. Never guess.
 - One insight = one file. Prefer editing/merging over creating near-duplicates.
+- DROP a learning that is regenerable from general engineering knowledge — a strong model
+  would emit it without the note (a generic framework how-to, a standard best practice, a
+  changelog of the diff). Trace it in `## Consolidation history`. This branch is human-reviewed,
+  so deleting here is safe. (Same bar capture/finalize apply via verify-by-ablation.)
 - Every deletion or rewrite leaves a `## Consolidation history` trace naming its
   sources — a reviewer must be able to see what happened and why.
 - Touch ONLY files under `{workspace}/{project}/`. Cross-project work is a later
