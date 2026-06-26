@@ -2382,7 +2382,7 @@ def main():
             vres = kb_verify.verify_paths(vault, changed_learn,
                                           cap=int(cfg.get("verify_cap", kb_verify.DEFAULT_VERIFY_CAP)))
             print(f"  [verify] checked={vres['checked']} dropped={len(vres['dropped'])} "
-                  f"kept={vres['kept']} errors={vres['errors']}")
+                  f"trimmed={len(vres['trimmed'])} kept={vres['kept']} errors={vres['errors']}")
             dropped = set(vres["dropped"])
             changed_learn = [r for r in changed_learn if r not in dropped]
         if changed_learn and kb_dedup is not None:

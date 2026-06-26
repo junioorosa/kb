@@ -12,7 +12,9 @@ that context would already know the thing. This module settles it empirically:
 If the cold answer already nails it, the note is regenerable from the model's training
 and general reasoning -> it is noise that dilutes retrieval -> DROP. If the cold answer
 misses/contradicts it, the note carries something the model can't produce on its own ->
-GOLD -> KEEP. (A note derivable from the *code* but not from training is kept: the cold
+GOLD -> KEEP. If the cold answer reproduces only the GENERIC part while the note also
+holds a local/domain fact -> TRIM to that delta (cut the regenerable tutorial, keep the
+fact). (A note derivable from the *code* but not from training is kept: the cold
 baseline has no repo access, so it cannot reproduce code-hidden facts — exactly the
 "from the code but cross-file / hidden -> SAVE" half of GATE 2.)
 
@@ -138,25 +140,36 @@ TASK: <<PROBE>>
 
 Give your best concrete answer: the decision you'd make and the key facts/gotchas you'd apply. A few bullets, primary points only."""
 
-_JUDGE = """You are strictly judging whether a knowledge note is worth storing, or is redundant with what any competent model already produces.
+_JUDGE = """You decide what to do with a stored knowledge note, using proof of what a model already knows without it.
 
-The TASK posed to a baseline model (which had NO access to the note or the codebase):
+A baseline model with NO access to the note or the codebase was asked:
 <<PROBE>>
 
-The baseline model's ANSWER:
+Its ANSWER (this is the evidence of what is regenerable from training):
 <<BASELINE>>
 
-The NOTE's specific claim (what storing it would add):
-<<CLAIM>>
+The full NOTE under judgement:
+<<NOTE>>
 
-Question: does the baseline answer ALREADY state the note's specific, actionable claim as a CLEAR / PRIMARY point? Judge strictly:
-- "regenerable": true ONLY if the baseline clearly and correctly states the SAME specific claim (not just touches the general topic, not buried as one guess among many, not a vaguer/weaker version).
-- If the baseline misses it, contradicts it, only gestures near the area, or states it as one of many speculative options -> regenerable: false.
-- If the note's value is a project/domain-specific FACT, enum, constant, contract, or non-obvious gotcha the baseline could not know -> regenerable: false.
-- "confidence": "high" only when the comparison is clear-cut; otherwise "low".
+Classify the NOTE against the baseline, strictly:
+- DROP — the baseline already states ALL of the note's substance (clearly, as primary points); nothing project/domain-specific survives. The note is redundant noise.
+- TRIM — the baseline reproduces the GENERAL/common part (a framework how-to, a best practice, the obvious reasoning), but the note ALSO carries specific things the baseline could NOT know (a project/domain fact, a magic constant or enum, a local constraint, a concrete config/contract, exact symbol names). Keep ONLY those; cut the regenerable tutorial.
+- KEEP — the note's CORE is something the baseline missed (gold as-is), OR it is already all-delta with nothing generic to cut.
 
-Output ONLY one JSON object, nothing else:
-{"regenerable": true|false, "confidence": "high"|"low", "reason": "<one sentence>"}"""
+Rules:
+- Conservative: if unsure between two, pick the SAFER one (KEEP over TRIM over DROP). Only DROP/TRIM when clear-cut.
+- "confidence": "high" only when clear-cut; otherwise "low" (the caller then KEEPs).
+- For TRIM, the rewrite MUST preserve EVERY project/domain-specific fact, constant, enum, contract, local constraint, config value, code symbol and [[wikilink]] — lose nothing local; cut only what the baseline clearly reproduced. Keep the `---` frontmatter (you may tighten its description). Write in the note's language.
+
+Output format EXACTLY:
+VERDICT: KEEP | TRIM | DROP
+CONFIDENCE: high | low
+REASON: <one sentence>
+
+(only when VERDICT is TRIM, then also:)
+---TRIMMED---
+<full rewritten note: --- frontmatter --- block + trimmed body>
+---END---"""
 
 
 def _fill(tmpl: str, **kw) -> str:
@@ -167,16 +180,23 @@ def _fill(tmpl: str, **kw) -> str:
 
 
 def _parse_verdict(stdout: str) -> dict | None:
-    m = re.search(r"\{.*\}", stdout, re.S)
-    if not m:
+    """Parse the judge's KEEP/TRIM/DROP verdict (+ rewritten body for TRIM). None if
+    unparseable -> caller treats as KEEP (conservative)."""
+    vm = re.search(r"(?mi)^\s*VERDICT:\s*(KEEP|TRIM|DROP)\b", stdout)
+    if not vm:
         return None
-    try:
-        obj = json.loads(m.group(0))
-    except Exception:
-        return None
-    if not isinstance(obj, dict) or "regenerable" not in obj:
-        return None
-    return obj
+    verdict = vm.group(1).upper()
+    cm = re.search(r"(?mi)^\s*CONFIDENCE:\s*(high|low)\b", stdout)
+    rm = re.search(r"(?mi)^\s*REASON:\s*(.+)$", stdout)
+    out = {"verdict": verdict,
+           "confidence": (cm.group(1).lower() if cm else "low"),
+           "reason": (rm.group(1).strip()[:300] if rm else "")}
+    if verdict == "TRIM":
+        tm = re.search(r"---TRIMMED---\s*\n(.*?)\n---END---", stdout, re.S)
+        if not tm or not tm.group(1).strip():
+            return None  # TRIM claimed but no usable body -> conservative KEEP
+        out["trimmed"] = tm.group(1).strip() + "\n"
+    return out
 
 
 def verify_learning(vault: Path, learning_rel: str, max_turns: int = DEFAULT_MAX_TURNS) -> dict:
@@ -206,19 +226,22 @@ def verify_learning(vault: Path, learning_rel: str, max_turns: int = DEFAULT_MAX
         return {**base, "decision": "error", "probe": probe, "reason": f"baseline failed: {err[:120]}"}
 
     rc, jout, err = claude_run(
-        _fill(_JUDGE, PROBE=probe, BASELINE=baseline.strip(), CLAIM=claim), max_turns)
+        _fill(_JUDGE, PROBE=probe, BASELINE=baseline.strip(), NOTE=text), max_turns)
     if rc != 0:
         return {**base, "decision": "error", "probe": probe, "reason": f"judge failed: {err[:120]}"}
-    verdict = _parse_verdict(jout)
-    if verdict is None:
+    j = _parse_verdict(jout)
+    if j is None:
         return {**base, "decision": "error", "probe": probe, "reason": "judge output unparseable"}
-
-    regenerable = bool(verdict.get("regenerable"))
-    confidence = str(verdict.get("confidence", "")).lower()
-    reason = str(verdict.get("reason", ""))[:300]
-    drop = regenerable and confidence == "high"
-    return {"rel": learning_rel, "decision": "drop" if drop else "keep",
-            "regenerable": regenerable, "confidence": confidence, "reason": reason, "probe": probe}
+    verdict, confidence, reason = j["verdict"], j["confidence"], j["reason"]
+    # Conservative: act (DROP/TRIM) only on a clear, high-confidence call; else KEEP.
+    if confidence != "high" or verdict == "KEEP":
+        return {**base, "confidence": confidence, "probe": probe,
+                "reason": reason or f"{verdict.lower()} (kept)"}
+    if verdict == "DROP":
+        return {"rel": learning_rel, "decision": "drop", "confidence": confidence,
+                "reason": reason, "probe": probe}
+    return {"rel": learning_rel, "decision": "trim", "trimmed": j["trimmed"],
+            "confidence": confidence, "reason": reason, "probe": probe}
 
 
 def record_drop(vault: Path, verdict: dict) -> bool:
@@ -247,6 +270,21 @@ def record_drop(vault: Path, verdict: dict) -> bool:
             pass
     try:
         learning.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def record_trim(vault: Path, learning_rel: str, body: str, reason: str) -> bool:
+    """Overwrite the learning with its trimmed (delta-only) body + a `## Verify-trimmed`
+    trace. The judge preserved every local fact; only the regenerable tutorial was cut.
+    Returns True on write. (Less destructive than a drop — the note survives, shorter.)"""
+    line = (f"- {date.today().isoformat()} trimmed to the non-regenerable delta "
+            f"(verify-by-ablation). {reason.strip()}")
+    out = body.rstrip()
+    out += ("\n" if "## Verify-trimmed" in out else "\n\n## Verify-trimmed\n") + line + "\n"
+    try:
+        (vault / learning_rel).write_text(out, encoding="utf-8")
         return True
     except OSError:
         return False
@@ -294,7 +332,7 @@ def verify_paths(vault: Path, rels: list[str], cap: int | None = None,
     if cap is not None and len(rels) > cap:
         deferred = rels[cap:]
         rels = rels[:cap]
-    dropped, kept, errors = [], 0, 0
+    dropped, trimmed, kept, errors = [], [], 0, 0
     for rel in rels:
         v = verify_learning(vault, rel)
         if v["decision"] == "drop":
@@ -303,6 +341,12 @@ def verify_paths(vault: Path, rels: list[str], cap: int | None = None,
             elif record_drop(vault, v):
                 log(f"  [verify] dropped {rel} — regenerable ({v['reason']})")
             dropped.append(rel)
+        elif v["decision"] == "trim":
+            if dry_run:
+                log(f"  [verify] WOULD TRIM {rel} — {v['reason']}")
+            elif record_trim(vault, rel, v["trimmed"], v["reason"]):
+                log(f"  [verify] trimmed {rel} — kept local delta ({v['reason']})")
+            trimmed.append(rel)
         elif v["decision"] == "error":
             errors += 1
             log(f"  [verify] kept {rel} — check failed, conservative keep ({v['reason']})")
@@ -310,7 +354,7 @@ def verify_paths(vault: Path, rels: list[str], cap: int | None = None,
             kept += 1
     if deferred:
         log(f"  [verify] deferred {len(deferred)} learning(s) over cap={cap}: {', '.join(deferred[:5])}{'…' if len(deferred) > 5 else ''}")
-    return {"checked": len(rels), "dropped": dropped, "kept": kept,
+    return {"checked": len(rels), "dropped": dropped, "trimmed": trimmed, "kept": kept,
             "errors": errors, "deferred": deferred}
 
 
