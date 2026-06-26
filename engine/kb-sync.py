@@ -60,6 +60,28 @@ def _load_kb_embed():
 kb_embed = _load_kb_embed()
 
 
+def _load_sibling(name: str):
+    """Load a sibling engine module by file path (robust to sys.path / hyphenated
+    script invocation). Returns None if absent/broken so the sync degrades gracefully."""
+    import importlib.util as ilu
+    here = Path(__file__).resolve().parent
+    spec = ilu.spec_from_file_location(name, here / (name + ".py"))
+    if spec is None or spec.loader is None:
+        return None
+    mod = ilu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        return None
+    return mod
+
+
+# Gold-gate axes applied after capture/finalize: ablation (regenerable vs training) and
+# dedup (twin vs another note). Optional — missing/broken modules just skip that axis.
+kb_verify = _load_sibling("kb_verify")
+kb_dedup = _load_sibling("kb_dedup")
+
+
 # Shared engine config resolver (kb_config). Sibling in the flat layout (repo
 # engine/ and deployed <kb home>/engine/); the pre-0.11 deploy had it under
 # ../hooks/. Loaded by path so the scheduled run honors KB_VAULT and the single
@@ -1158,6 +1180,42 @@ def clear_mark_experimental(branch: str):
                 pass
 
 
+def manually_discarded_branches() -> set:
+    """Branches the user flagged via `/kb-mark --discard` (sidecar flag mark_discarded).
+    Their freshly-captured _index.md is force-set to status=discarded so retrieval excludes
+    them (weight 0). Terminal: a dead end stays excluded until manually reopened — capture
+    skips it and it is NOT auto-recovered on merge (unlike experimental)."""
+    out = set()
+    if not STATE_DIR.exists():
+        return out
+    for sc in STATE_DIR.glob("kb-session-branch-*.json"):
+        try:
+            d = json.loads(sc.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("mark_discarded") and d.get("branch"):
+            out.add(d["branch"])
+    return out
+
+
+def clear_mark_discarded(branch: str):
+    """Drop mark_discarded from sidecars for this branch after it's been applied, so a
+    future branch reusing the name doesn't inherit the flag."""
+    if not STATE_DIR.exists():
+        return
+    for sc in STATE_DIR.glob("kb-session-branch-*.json"):
+        try:
+            d = json.loads(sc.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("branch") == branch and d.get("mark_discarded"):
+            d.pop("mark_discarded", None)
+            try:
+                sc.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+
+
 def set_index_status(vault: Path, folder_rel: str, status: str) -> bool:
     """Patch `status:` in <vault>/<folder_rel>/_index.md frontmatter. True on write."""
     idx = vault / folder_rel / "_index.md"
@@ -1404,6 +1462,52 @@ def format_session_hints_block(hints: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Shared gold bar for ADDS, injected into BOTH capture_prompt and finalize_prompt
+# (and referenced by kb-consolidate) so no producer can silently bypass it. Two
+# co-required gates: TRANSFER (helps a future, different ticket) and NON-OBVIOUS
+# (not regenerable from the model's training + the visible code). The verify pass
+# (verify_learning) is the empirical backstop when this self-judgment is wrong.
+WORTH_SAVING_TEST = """**Worth-saving test — a learning must pass BOTH gates, or SKIP (when in doubt, SKIP):**
+
+GATE 1 — TRANSFER: does it help a FUTURE, DIFFERENT ticket? Git already records what
+THIS branch changed; the KB earns its place only if an unrelated future task would want
+it. A learning is knowledge, not a diary entry.
+- Strip-the-ticket test: mentally delete every "in this ticket / I changed / we fixed".
+  Does a standalone rule, constraint, invariant, gotcha, or symptom→root-cause mapping
+  survive? KEEP. Does it collapse to "someone fixed bug X"? → diary entry, SKIP.
+- Future-grep test: what query retrieves this? If the only one is "what did ticket <id>
+  do", it is a diary entry → SKIP. If it is a real problem a future task hits
+  ("integrate returns without duplicating"), it passes.
+- A note that only narrates the diff (lists which methods/fields/annotations changed) is
+  a changelog → SKIP, even when the change itself was non-obvious.
+
+GATE 2 — NON-OBVIOUS: can a strong model + the visible code/diff regenerate it? Ask
+"where else could this come from?":
+- Nowhere but a human decision/fact — a magic constant's meaning (`202`=RETURN_ORDER),
+  a rule confirmed with a person/PR ("confirmed with the tax team…"; "specific to
+  this carrier's API — PR #1084"), a deliberate trade-off + its rationale → SAVE (highest value).
+- From the code but cross-file / hidden — existence + contract of a project util/hook
+  (a Tuple-to-POJO mapper util, a canonical post-emission hook method), a naming
+  convention (an `*ActiveOnly` DAO suffix), a stack-specific silent-fail gotcha (Jackson
+  reads `active` not `isActive`) → SAVE.
+- Only from the model's general knowledge — a framework how-to it already emits
+  (Chart.js dual axis, CSS `min-width:0`, "extract a value object"), a generic best
+  practice → DO NOT SAVE (noise; it dilutes retrieval).
+- EXCEPTION: a generic technique the team deliberately standardizes AGAINST the
+  model's default (a house convention enforced in review) → a SHORT note capturing
+  the DECISION, not the tutorial.
+
+**Title = the claim, not the event.** The slug/title must state the LESSON
+(`upsert-por-codigo-integracao-nunca-pk-oracle`), never describe the event
+(`getbyid-pk-com-fk-duplica`). If you cannot phrase the title as a reusable rule, the
+content is almost certainly a diary entry → SKIP.
+
+**Write the delta, not a tutorial.** Lead with the surprising part — the fact/gotcha/
+decision the model wouldn't already say. Strip what a competent dev already knows (what
+the framework is, standard API usage). If nothing non-regenerable survives the strip,
+SKIP rather than create the file."""
+
+
 def capture_prompt(cfg, workspace, repo, branch, tipo, slug, folder_rel, default, commits, stat, diff, hints, pre_extracted: str = ""):
     vault = cfg["vault"]
     hints_block = "" if pre_extracted else format_session_hints_block(hints)
@@ -1466,7 +1570,7 @@ opened: <YYYY-MM-DD today>
 resolved:
 last_update: <YYYY-MM-DD today>
 apparent_problem: |-
-  <derived from commit messages — concise>
+  <the user-visible symptom or goal — what broke or was requested, NOT what you changed>
 actual_solution:
 tags: []
 related_tickets: []
@@ -1493,29 +1597,10 @@ pr:
      - ticket: `{vault}/{folder}/Learnings/<name>.md`
      - project: `{vault}/{workspace}/{repo.name}/Learnings/<name>.md`
      - workspace: `{vault}/{workspace}/Learnings/<name>.md`
-   Default conservative: ticket.
+   Default conservative: ticket. NEVER re-create a learning listed under the ticket
+   `_index.md`'s `## Verify-dropped` section — it was judged regenerable and removed; re-adding it just loops.
 
-   **Worth-saving test — the bar for ADDS (when in doubt, SKIP):**
-   A learning earns its place ONLY if it carries what a strong model + the visible
-   code/diff CANNOT regenerate. Ask "where else could this come from?":
-   - Nowhere but a human decision/fact — a magic constant's meaning (`202`=RETURN_ORDER),
-     a rule confirmed with a person/PR ("confirmed with the tax team…"; "specific to
-     this carrier's API — PR #1084"), a deliberate trade-off + its rationale → SAVE (highest value).
-   - From the code but cross-file / hidden — existence + contract of a project util/hook
-     (a Tuple-to-POJO mapper util, a canonical post-emission hook method), a naming
-     convention (an `*ActiveOnly` DAO suffix), a stack-specific silent-fail gotcha (Jackson
-     reads `active` not `isActive`) → SAVE.
-   - Only from the model's general knowledge — a framework how-to it already emits
-     (Chart.js dual axis, CSS `min-width:0`, "extract a value object"), a generic best
-     practice → DO NOT SAVE (noise; it dilutes retrieval).
-   - EXCEPTION: a generic technique the team deliberately standardizes AGAINST the
-     model's default (a house convention enforced in review) → a SHORT note capturing
-     the DECISION, not the tutorial.
-
-   **Write the delta, not a tutorial.** Lead with the surprising part — the fact/gotcha/
-   decision the model wouldn't already say. Strip what a competent dev already knows (what
-   the framework is, standard API usage). If nothing non-regenerable survives the strip,
-   SKIP rather than create the file.
+{WORTH_SAVING_TEST}
 
    **One insight = one file — no twin learnings this run.** When this diff yields several
    ADDS, audit them against EACH OTHER, not only the existing vault: if two candidates
@@ -1525,10 +1610,11 @@ pr:
    Prefer ADJUSTS on an existing file over a new near-duplicate — and an ADD that restates
    a learning already in `{folder}/Learnings/` (read in step 3) is a twin: ADJUST that
    file instead.
-5. Update `{vault}/{folder}/_index.md` apparent_problem / tags / related_tickets based on commits + diff. **Always set `last_update: <YYYY-MM-DD today>`**. Keep `branch: {branch}` intact — it is the match key. Do NOT set status=resolved here — only the finalize routine does that. Use English frontmatter keys: project, type, module, slug, title, opened, resolved, last_update, apparent_problem, actual_solution, related_tickets, branch, pr. Status enum: open|in-progress|resolved|discarded. Scope enum: ticket|project|workspace.
+5. Update `{vault}/{folder}/_index.md` apparent_problem / tags / related_tickets based on commits + diff. Keep apparent_problem as the symptom/goal, never a changelog of the fix; leave actual_solution empty here (finalize writes it later, as a diagnosis). **Always set `last_update: <YYYY-MM-DD today>`**. Keep `branch: {branch}` intact — it is the match key. Do NOT set status=resolved here — only the finalize routine does that. Use English frontmatter keys: project, type, module, slug, title, opened, resolved, last_update, apparent_problem, actual_solution, related_tickets, branch, pr. Status enum: open|in-progress|resolved|discarded. Scope enum: ticket|project|workspace.
 6. Report briefly: created/updated file paths, CONFIRMS/REFUTES/ADJUSTS/ADDS counts and names.
 
 YAML rules: long text fields use literal `|-` block; tags as `[a, b, c]`. Validate YAML before writing.
+Language: write all prose (apparent_problem, actual_solution, learning titles and bodies) in the SAME natural language as the existing notes in this vault/project — do NOT switch to English just because this prompt is in English. Frontmatter keys stay English.
 Do not ask. Default conservative: ticket scope; skip on ambiguity rather than promote.
 """
 
@@ -1576,13 +1662,13 @@ Resolved date: {res['landed_date']}
 {diff_block}{hints_block}{pre_block}
 Task:
 {steps12_text}
-3. Synthesize `actual_solution` (2-4 lines, past tense: what was actually done) from the evidence above.
+3. Synthesize `actual_solution` (2-4 lines) as a DIAGNOSIS, not a changelog: lead with the root cause, then why the fix resolves it, then the rule that prevents recurrence (link an existing pattern learning with [[…]] if one applies). Do NOT open with what was changed ("Reactivated…" / "Added…" / "Changed…") — diff narration is recoverable from git and has no transfer value. Distill the lesson, not the steps.
 4. Audit each existing learning (ticket + project + workspace scope):
    - CONFIRMS — keep.
    - REFUTES — correct the file, add `## Correction history` line.
    - ADJUSTS — edit to incorporate nuance.
-   - ADDS — a pattern NOT already recorded; create a new learning file (default scope:
-     ticket). **One insight = one file.** Before adding, check THIS ticket's own learnings
+   - ADDS — a pattern NOT already recorded that clears the worth-saving test (below);
+     create a new learning file (default scope: ticket). **One insight = one file.** Never re-create a learning listed under the `_index.md`'s `## Verify-dropped` section (judged regenerable + removed). Before adding, check THIS ticket's own learnings
      you read in step 1: if the landed diff merely restates an existing learning (even
      under a different name or wording), CONFIRM or ADJUST that file — never write a
      near-duplicate sibling. Prefer ADJUSTS on the existing file over a new near-dup.
@@ -1600,7 +1686,10 @@ Task:
    - keep `branch` and `pr` as-is.
 6. Report: status set, learnings audit counts (CONFIRMS/REFUTES/ADJUSTS/ADDS), ambiguous decisions noted.
 
+{WORTH_SAVING_TEST}
+
 YAML rules: long text fields use literal `|-` block; tags as `[a, b, c]`. English schema keys only. Status enum: open|in-progress|resolved|discarded.
+Language: write all prose (actual_solution, learning titles and bodies) in the SAME natural language as the existing notes in this vault/project — do NOT switch to English just because this prompt is in English. Frontmatter keys stay English.
 Do not ask.
 """
 
@@ -2075,6 +2164,7 @@ def main():
 
             candidates.sort(reverse=True)
             exp_branches = manually_experimental_branches()
+            disc_branches = manually_discarded_branches()
             seen = set()
             bf_done, cap_done = 0, 0  # backfills / normal captures executed this run (cap guards)
             for ts, origin_norm, branch, repo, tipo, slug, folder_rel, commits, email, since_spec, base, backfill, mine_base in candidates:
@@ -2095,8 +2185,10 @@ def main():
                     bf_done += 1
                 if not args.include_resolved:
                     st = ticket_status_for_branch(vault, ws["name"], repo.name, branch)
-                    if st in ("resolved", "experimental"):
-                        why = "already resolved" if st == "resolved" else "experimental (paused until prod merge or manual in-progress)"
+                    if st in ("resolved", "experimental", "discarded"):
+                        why = {"resolved": "already resolved",
+                               "experimental": "experimental (paused until prod merge or manual in-progress)",
+                               "discarded": "discarded (dead end; excluded — reopen manually to revisit)"}[st]
                         print(f"  [skip] {repo.relative_to(wpath)}:{branch} — KB {why}")
                         continue
                     # Skip capture when an existing open ticket's branch is already
@@ -2162,6 +2254,10 @@ def main():
                         if set_index_status(vault, f"{ws['name']}/{repo.name}/{folder_rel}", "experimental"):
                             print(f"    [experimental] status=experimental forced on {folder_rel}/_index.md")
                         clear_mark_experimental(branch)
+                    if branch in disc_branches:
+                        if set_index_status(vault, f"{ws['name']}/{repo.name}/{folder_rel}", "discarded"):
+                            print(f"    [discarded] status=discarded forced on {folder_rel}/_index.md")
+                        clear_mark_discarded(branch)
                 if out.strip():
                     for line in out.splitlines()[:60]:
                         print(f"    {line}")
@@ -2275,6 +2371,25 @@ def main():
     # merge decision is the human's (auto-merge would be a blind, lossy vault write).
     # Lands in the sync-history record below and the manager's sync-health strip.
     if not args.dry_run:
+        # Gold gate over the learnings THIS run wrote (mtime >= run start -> covers BOTH
+        # capture and finalize; excludes human edits made between syncs). Two orthogonal
+        # axes: verify-by-ablation (regenerable vs the model's training -> drop noise) and
+        # dedup (twin vs another note, embedding + LLM -> merge non-lossily). Both are
+        # conservative + non-fatal; a broken module just skips its axis.
+        changed_learn = [p.relative_to(vault).as_posix() for p in report.changed_files(vault)
+                         if "/Learnings/" in p.as_posix() and not p.name.endswith("_index.md")]
+        if changed_learn and kb_verify is not None:
+            vres = kb_verify.verify_paths(vault, changed_learn,
+                                          cap=int(cfg.get("verify_cap", kb_verify.DEFAULT_VERIFY_CAP)))
+            print(f"  [verify] checked={vres['checked']} dropped={len(vres['dropped'])} "
+                  f"kept={vres['kept']} errors={vres['errors']}")
+            dropped = set(vres["dropped"])
+            changed_learn = [r for r in changed_learn if r not in dropped]
+        if changed_learn and kb_dedup is not None:
+            dres = kb_dedup.dedup_paths(vault, changed_learn, store=embed_store,
+                                        cap=int(cfg.get("dedup_cap", kb_dedup.DEFAULT_DEDUP_CAP)))
+            print(f"  [dedup] suspect-pairs={dres['pairs']} merged={len(dres['merged'])} "
+                  f"kept={dres['kept']} errors={dres['errors']}")
         report.duplicates = dedup_scan(report, vault)
         if report.duplicates:
             twins = sum(1 for d in report.duplicates if d.get("kind") == "twin")

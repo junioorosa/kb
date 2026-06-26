@@ -1,7 +1,7 @@
 ---
 description: Mark the current session with a branch in the KB sidecar, and close or down-weight tickets manually
 allowed-tools: Bash
-argument-hint: <free branch, e.g. feat/my-feature or experiment> | --experimental | --done | --remove
+argument-hint: <free branch, e.g. feat/my-feature or experiment> | --experimental | --discard | --done | --remove
 ---
 
 # /kb-mark
@@ -18,11 +18,12 @@ The branch name is free-form and is the KB **match key**. A `<type>/` prefix (e.
 /kb-mark fix/login-timeout       # groups under the fix/ folder
 /kb-mark experiment-x            # no "/" -> directly under the project
 /kb-mark --experimental [branch] # mark status=experimental (retrieval down-weight)
+/kb-mark --discard [branch]      # mark status=discarded (dead end; excluded from retrieval)
 /kb-mark --done [branch]         # close the ticket (status=resolved on the next sync)
 /kb-mark --remove                # remove the session's mark
 ```
 
-With no `<branch>`, `--experimental` and `--done` also fall back to the current git branch when the session isn't already marked.
+With no `<branch>`, `--experimental`, `--discard` and `--done` also fall back to the current git branch when the session isn't already marked.
 
 ## When to use it
 
@@ -49,6 +50,14 @@ Use `/kb-mark --done` when automatic finalization doesn't fire:
 For a branch that may not go anywhere. Retrieval applies a down-weight (weight 0.4) to the ticket, so it stops polluting the mid/high tiers of tangential prompts — but it still shows up if you ask about its exact topic. The branch is **optional**: with no argument it marks the session's current branch; pass one explicitly to mark a different branch (handy when a single session touched real work on one branch and a secondary, experimental idea on another).
 
 If the `_index.md` already exists, the status is written on the spot; otherwise a flag is stored in the sidecar and the next sync forces it at capture. Fully reversible: if the branch merges, the finalize step sets `resolved` and the weight returns to 1.0 (or use `--done` to force it).
+
+## Discard a dead end (`--discard`)
+
+For a branch that won't go anywhere and has nothing worth keeping — an abandoned spike, a fix superseded elsewhere, or a ticket whose capture is just noise. Retrieval **excludes** the ticket entirely (weight 0), so it stops surfacing.
+
+Unlike `--experimental` (weight 0.4, auto-recovers on merge), `--discard` is **terminal**: the ticket stays excluded until you reopen it (re-mark the branch, or edit `status` in `_index.md`). Capture skips it on every sync, so it stops generating diary churn for work that led nowhere.
+
+If the `_index.md` already exists, the status is written on the spot; otherwise a flag is stored in the sidecar and the next sync forces it at capture.
 
 ## Execution
 
