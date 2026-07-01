@@ -1612,6 +1612,8 @@ pr:
    file instead.
 5. Update `{vault}/{folder}/_index.md` apparent_problem / tags / related_tickets based on commits + diff. Keep apparent_problem as the symptom/goal, never a changelog of the fix; leave actual_solution empty here (finalize writes it later, as a diagnosis). **Always set `last_update: <YYYY-MM-DD today>`**. Keep `branch: {branch}` intact — it is the match key. Do NOT set status=resolved here — only the finalize routine does that. Use English frontmatter keys: project, type, module, slug, title, opened, resolved, last_update, apparent_problem, actual_solution, related_tickets, branch, pr. Status enum: open|in-progress|resolved|discarded. Scope enum: ticket|project|workspace.
 6. Report briefly: created/updated file paths, CONFIRMS/REFUTES/ADJUSTS/ADDS counts and names.
+   Then end your output with EXACTLY this line (the run report parses it — integer counts only, nothing else on the line):
+   `KB-COUNTS: confirms=<n> refutes=<n> adjusts=<n> adds=<n>`
 
 YAML rules: long text fields use literal `|-` block; tags as `[a, b, c]`. Validate YAML before writing.
 Language: write all prose (apparent_problem, actual_solution, learning titles and bodies) in the SAME natural language as the existing notes in this vault/project — do NOT switch to English just because this prompt is in English. Frontmatter keys stay English.
@@ -1662,7 +1664,7 @@ Resolved date: {res['landed_date']}
 {diff_block}{hints_block}{pre_block}
 Task:
 {steps12_text}
-3. Synthesize `actual_solution` (2-4 lines) as a DIAGNOSIS, not a changelog: lead with the root cause, then why the fix resolves it, then the rule that prevents recurrence (link an existing pattern learning with [[…]] if one applies). Do NOT open with what was changed ("Reactivated…" / "Added…" / "Changed…") — diff narration is recoverable from git and has no transfer value. Distill the lesson, not the steps.
+3. Set `actual_solution` as a SHORT ledger pointer (1-2 lines), NOT the knowledge itself. The `_index` is a ROUTER: it helps a future reader FIND this ticket by symptom; the transferable knowledge lives in Learnings (gold-gated in step 4). So name the root cause in ONE clause, then point to the learning that carries the lesson with [[…]] — an existing pattern learning if one covers it, or the new learning you ADD in step 4 if the lesson clears the worth-saving test. Never write a diagnosis essay or a tutorial here, and never narrate the diff ("Reactivated…"/"Added…"). If the lesson is regenerable/textbook (fails step 4's test), do NOT smuggle it into `actual_solution` — keep the pointer bare ("Root cause X; resolved via <existing pattern>, no new transferable rule."). Example shape: "Root cause: PK do destino reusada como FK de origem; resolvido pelo upsert-por-código-de-integração — ver [[upsert-por-codigo-integracao-orelseget]]."
 4. Audit each existing learning (ticket + project + workspace scope):
    - CONFIRMS — keep.
    - REFUTES — correct the file, add `## Correction history` line.
@@ -1682,9 +1684,11 @@ Task:
    - status: resolved
    - resolved: {res['landed_date']}
    - last_update: <YYYY-MM-DD today>
-   - actual_solution: <synthesized>
+   - actual_solution: <the short ledger pointer from step 3 — root cause clause + [[learning]], never a tutorial>
    - keep `branch` and `pr` as-is.
 6. Report: status set, learnings audit counts (CONFIRMS/REFUTES/ADJUSTS/ADDS), ambiguous decisions noted.
+   Then end your output with EXACTLY this line (the run report parses it — integer counts only, nothing else on the line):
+   `KB-COUNTS: confirms=<n> refutes=<n> adjusts=<n> adds=<n>`
 
 {WORTH_SAVING_TEST}
 
@@ -1771,6 +1775,54 @@ class RunReport:
 
     def has_activity(self) -> bool:
         return bool(self.captures or self.finalizes)
+
+    # Deterministic audit marker emitted by capture/finalize prompts (step 6). Parsed
+    # instead of the model's free prose (which varies: "·" vs "/" separators, "ADDS 1"
+    # vs "ADDS: 1") so the "examined, no new knowledge" signal is reliable.
+    # Locate the marker line, then extract each field by NAME — order-independent and
+    # separator-tolerant (the model may write "confirms=0, refutes=0" with commas or
+    # reorder). A fixed-order `\s+` regex would silently miss those, which is exactly
+    # the fragile-parse failure this marker exists to avoid.
+    _KB_COUNTS_LINE_RE = re.compile(r"KB-COUNTS:[ \t]*(.+)", re.I)
+    _KB_FIELD_RE = re.compile(r"(confirms|refutes|adjusts|adds)\s*=\s*(\d+)", re.I)
+
+    @classmethod
+    def _counts(cls, stdout: str):
+        if not stdout:
+            return None
+        m = cls._KB_COUNTS_LINE_RE.search(stdout)
+        if not m:
+            return None
+        fields = {k.lower(): int(v) for k, v in cls._KB_FIELD_RE.findall(m.group(1))}
+        if not {"confirms", "refutes", "adjusts", "adds"} <= set(fields):
+            return None  # marker present but malformed -> conservative: treat as unknown
+        return {k: fields[k] for k in ("confirms", "refutes", "adjusts", "adds")}
+
+    def examined_no_knowledge(self) -> list:
+        """Branches the run examined but that yielded no NEW knowledge: adds+adjusts+
+        refutes == 0. ADDS=0 alone is NOT enough — an ADJUST or REFUTE is real knowledge
+        work. Unparseable counts are skipped (unknown != none); errored runs excluded.
+
+        A FINALIZE with no new knowledge is terminal (branch done, added nothing — the
+        "examined, not knowledge" case the user asked to surface). A CAPTURE is mid-flight:
+        only flag it if it actually re-confirmed existing knowledge (confirms>0); an
+        all-zero capture is just an early open branch that hasn't produced yet, NOT a
+        rejection — flagging it would mislabel in-progress work."""
+        out = []
+        rows = ([("capture", c) for c in self.captures]
+                + [("finalize", f) for f in self.finalizes])
+        for kind, e in rows:
+            if e.get("rc"):
+                continue
+            cnt = self._counts(e.get("stdout", ""))
+            if not cnt or (cnt["adds"] + cnt["adjusts"] + cnt["refutes"]) != 0:
+                continue
+            if kind == "capture" and cnt["confirms"] == 0:
+                continue  # fresh open branch, nothing produced yet — not a rejection
+            out.append({"kind": kind, "repo_rel": e.get("repo_rel", ""),
+                        "branch": e.get("branch", ""), "slug": e.get("slug", ""),
+                        "counts": cnt})
+        return out
 
     def to_record(self, vault: Path, dry_run: bool) -> dict:
         """A compact, structured record of this run for the sync-history sidecar the
@@ -1897,6 +1949,22 @@ class RunReport:
                 + '</details>'
             )
 
+        nk = self.examined_no_knowledge()
+        nk_html = ""
+        if nk:
+            nk_rows = "".join(
+                f'<li><code>{esc(e["repo_rel"])}</code> · {esc(e["branch"])} '
+                f'<span class="meta">confirms={e["counts"]["confirms"]} · adds/adjusts/refutes=0</span></li>'
+                for e in nk
+            )
+            nk_html = (
+                f'<h2>Examined — no new knowledge ({len(nk)})</h2>'
+                '<p class="lede">Branches examined and finalized/captured that produced no new '
+                'transferable knowledge (the audit added, adjusted and refuted nothing). Listed so a '
+                'skipped write is visible, not silent — see the matching card above for the reasoning.</p>'
+                f'<ul>{nk_rows}</ul>'
+            )
+
         files_html = "".join(file_card(p) for p in changed) or "<p class='empty'>No files changed.</p>"
 
         warn_html = ""
@@ -1968,7 +2036,7 @@ class RunReport:
 
 <h2>Finalizes ({len(self.finalizes)})</h2>
 {"".join(fin_html) or "<p class='empty'>No finalizes.</p>"}
-
+{nk_html}
 <h2>Files modified in the vault ({len(changed)})</h2>
 {files_html}
 
@@ -2353,6 +2421,10 @@ def main():
                             print(f"    {line}")
 
     print(f"\n=== done. captures={captures} finalizes={finalizes} errors={errors} dry_run={args.dry_run} ===")
+    _nk = report.examined_no_knowledge()
+    if _nk:
+        print(f"  [examined-no-knowledge] {len(_nk)} branch(es) examined, added no new knowledge: "
+              + ", ".join(f'{e["repo_rel"]}:{e["branch"]}' for e in _nk))
 
     # Advance the date HWM (last_examined_at) for origins examined cleanly THIS run:
     # fetched OK and with zero capture/finalize errors and zero cap-deferrals. Skipped

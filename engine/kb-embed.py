@@ -47,6 +47,13 @@ DIM = 384
 MAX_CHUNK_CHARS = 6000      # safety cap; model truncates internally at ~512 tokens
 JSONL_CHUNK_CHARS = 1500    # per turn-pair chunk
 
+# Bump when the embedding TEXT logic (_md_text) changes so the sha/mtime skip in
+# reindex_vault is bypassed and every note is re-embedded once. Without this, an
+# on-disk-unchanged note keeps its stale vector (mtime match short-circuits before
+# sha), so a logic-only change would silently never reach the index.
+EMBED_VERSION = 2
+_EMBED_VERSION_FILE = CACHE_DIR / "embed_version"
+
 
 class EmbeddingsUnavailable(RuntimeError):
     pass
@@ -102,6 +109,51 @@ def file_sha(path: Path) -> str:
     return h.hexdigest()
 
 
+def _read_embed_version() -> int:
+    try:
+        return int(_EMBED_VERSION_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _write_embed_version() -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _EMBED_VERSION_FILE.write_text(str(EMBED_VERSION), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _strip_fm_block(raw: str, key: str) -> str:
+    """Drop one top-level frontmatter field (inline or block scalar) from a note's
+    raw text, keeping the rest of the frontmatter + body intact.
+
+    An `_index.md` routes by SYMPTOM (title / apparent_problem); its `actual_solution`
+    is a ledger pointer, not knowledge — keeping it out of the embedding text stops the
+    ticket diary from matching as if it were a learning. The knowledge lives in
+    Learnings, which are embedded whole."""
+    if not raw.startswith("---"):
+        return raw
+    end = raw.find("\n---", 3)
+    if end < 0:
+        return raw
+    fm = raw[3:end]        # between the fences (leading "\n" preserved by splitlines)
+    rest = raw[end:]       # "\n---" + body onward
+    out, skipping = [], False
+    for line in fm.splitlines():
+        is_top = bool(line.strip()) and line[:1] not in (" ", "\t")
+        if skipping:
+            if is_top:
+                skipping = False   # next top-level key ends the block scalar
+            else:
+                continue           # still inside the multi-line value
+        if is_top and line.split(":", 1)[0].strip() == key:
+            skipping = True
+            continue
+        out.append(line)
+    return "---" + "\n".join(out) + rest
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="ignore")
@@ -112,6 +164,8 @@ def _read_text(path: Path) -> str:
 def _md_text(path: Path) -> tuple[str, str]:
     """Return (text_for_embedding, preview)."""
     raw = _read_text(path)
+    if path.name == "_index.md":
+        raw = _strip_fm_block(raw, "actual_solution")
     body = raw
     if raw.startswith("---"):
         end = raw.find("\n---", 3)
@@ -258,6 +312,9 @@ def reindex_vault(vault: Path, store: VectorStore, verbose: bool = False) -> dic
     added = updated = removed = skipped = 0
     seen = set()
     candidates = []
+    # Embedding-logic changed since last index? Force a one-time full re-embed:
+    # the mtime/sha fast-path below would otherwise skip on-disk-unchanged notes.
+    force = _read_embed_version() != EMBED_VERSION
 
     if not vault.exists():
         return {"added": 0, "updated": 0, "removed": 0, "skipped": 0, "total": 0}
@@ -282,14 +339,17 @@ def reindex_vault(vault: Path, store: VectorStore, verbose: bool = False) -> dic
         except OSError:
             continue
         info = store.manifest.get(rel)
-        if info and info.get("mtime") == mtime:
-            skipped += 1
-            continue
-        sha = file_sha(md)
-        if info and info.get("sha") == sha:
-            info["mtime"] = mtime
-            skipped += 1
-            continue
+        if not force:
+            if info and info.get("mtime") == mtime:
+                skipped += 1
+                continue
+            sha = file_sha(md)
+            if info and info.get("sha") == sha:
+                info["mtime"] = mtime
+                skipped += 1
+                continue
+        else:
+            sha = file_sha(md)
         full_text, preview = _md_text(md)
         if not full_text.strip():
             continue
@@ -325,6 +385,8 @@ def reindex_vault(vault: Path, store: VectorStore, verbose: bool = False) -> dic
             store.manifest[rel] = {
                 "sha": sha, "mtime": mtime, "kind": "md", "chunk_ids": [nid],
             }
+
+    _write_embed_version()  # mark this logic version indexed (arms the force gate)
 
     if verbose:
         print(f"  [embed] vault: +{added} ~{updated} -{removed} skip={skipped}")
